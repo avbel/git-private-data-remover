@@ -33,9 +33,9 @@ bun run src/index.ts -w <working-directory> -f <file> -l <line-spec> [options]
 
 | Flag | Description |
 |------|-------------|
+| `-w, --working-directory <path>` | Directory of the git repository to operate on (required) |
 | `-f, --file <path>` | File containing private data (required) |
 | `-l, --lines <spec>` | Line number(s) to remove. Use comma to separate multiple specs. Format: `10` for single line, `10-20` for range (required) |
-| `-w, --working-directory <path>` | Run git operations in the specified directory (defaults to current directory) |
 | `-d, --dry-run` | Show what would be changed without modifying history |
 | `-h, --help` | Show help message |
 
@@ -44,19 +44,19 @@ bun run src/index.ts -w <working-directory> -f <file> -l <line-spec> [options]
 Remove a single line:
 
 ```bash
-bun run src/index.ts -f config.json -l 15
+bun run src/index.ts -w . -f config.json -l 15
 ```
 
 Remove multiple lines and ranges:
 
 ```bash
-bun run src/index.ts -f .env -l 5,10-15
+bun run src/index.ts -w . -f .env -l 5,10-15
 ```
 
 Dry-run to preview changes:
 
 ```bash
-bun run src/index.ts -f secrets.txt -l 3-7 --dry-run
+bun run src/index.ts -w . -f secrets.txt -l 3-7 --dry-run
 ```
 
 Run in a different repository:

@@ -89,24 +89,22 @@ async function main(): Promise<void> {
     process.exit(0);
   }
 
-  if (!values.file || !values.lines || values.lines.trim() === '') {
-    console.error(`${ICONS.error} Error: --file and --lines are required`);
+  if (!values['working-directory'] || !values.file || !values.lines || values.lines.trim() === '') {
+    console.error(`${ICONS.error} Error: --working-directory, --file and --lines are required`);
     printUsage();
     process.exit(1);
   }
 
-  if (values['working-directory']) {
-    const cwd = values['working-directory'];
-    const dirExists = existsSync(cwd) && statSync(cwd).isDirectory();
+  const cwd = values['working-directory'];
+  const dirExists = existsSync(cwd) && statSync(cwd).isDirectory();
 
-    if (!dirExists) {
-      console.error(`${ICONS.error} Working directory not found: ${cwd}`);
-      process.exit(1);
-    }
-
-    process.chdir(cwd);
-    console.log(`Working directory: ${cwd}`);
+  if (!dirExists) {
+    console.error(`${ICONS.error} Working directory not found: ${cwd}`);
+    process.exit(1);
   }
+
+  process.chdir(cwd);
+  console.log(`Working directory: ${cwd}`);
 
   await checkGitVersion(MIN_GIT_VERSION);
 
@@ -318,16 +316,16 @@ Usage:
   bun run src/index.ts [options]
 
 Options:
+  -w, --working-directory <path>  Directory of the git repository (required)
   -f, --file <path>     File containing private data (required)
   -l, --lines <spec>    Line number(s) to remove (required, comma-separated)
                         Format: "10" for single line, "10-20" for range, "10,20-30" for multiple
-  -w, --working-directory <path>  Run git operations in the specified directory
   -d, --dry-run         Show what would be changed without modifying history
   -h, --help            Show this help message
 
 Examples:
-  bun run src/index.ts -f config.json -l 15
-  bun run src/index.ts -f .env -l 5,10-15 --dry-run
+  bun run src/index.ts -w . -f config.json -l 15
+  bun run src/index.ts -w . -f .env -l 5,10-15 --dry-run
 `);
 }
 
