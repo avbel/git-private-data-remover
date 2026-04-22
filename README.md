@@ -26,7 +26,7 @@ bun install
 ## Usage
 
 ```bash
-bun run src/index.ts -f <file> -l <line-spec> [options]
+bun run src/index.ts -w <working-directory> -f <file> -l <line-spec> [options]
 ```
 
 ### Options
