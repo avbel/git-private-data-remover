@@ -111,6 +111,12 @@ bun run prepare
 - **Remote warning**: Warns if repository has a remote upstream
 - **Force-push reminder**: Shows the exact command needed after rewrite
 
+## Privacy & Control
+
+- **Your data stays private**: All replacement text is entered via interactive prompts — nothing is passed as command-line arguments, so your private data will never be stored in shell history
+- **Full control**: You decide which commits to modify. Each commit is presented for confirmation with the exact lines it contains — no automatic rewrites, no black boxes
+- **Transparent process**: Every step is shown and requires your explicit approval before any changes are made
+
 ## Limitations
 
 - One file per run
