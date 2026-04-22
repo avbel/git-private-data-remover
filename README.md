@@ -12,6 +12,27 @@ A TypeScript/Bun CLI tool to remove accidentally committed private data from git
 - **Git version check**: Verifies git supports required features
 - **Storage cleanup**: Compresses git storage to remove traces of old data
 
+## Safety Features
+
+- **Backup branch**: Automatically creates `backup/<branch>/<timestamp>` before rewriting
+- **Content validation**: Verifies line content matches before replacement
+- **Remote warning**: Warns if repository has a remote upstream
+- **Force-push reminder**: Shows the exact command needed after rewrite
+
+## Privacy & Control
+
+- **Your data stays private**: All replacement text is entered via interactive prompts — nothing is passed as command-line arguments, so your private data will never be stored in shell history
+- **Full control**: You decide which commits to modify. Each commit is presented for confirmation with the exact lines it contains — no automatic rewrites, no black boxes
+- **Transparent process**: Every step is shown and requires your explicit approval before any changes are made
+
+## Limitations
+
+- One file per run
+- Literal replacements only (no regex)
+- Lines must be specified explicitly (no automatic detection)
+- May conflict if later commits modified the same lines
+
+
 ## Prerequisites
 
 - [Bun](https://bun.sh) >= 1.0
@@ -98,25 +119,6 @@ This project uses [Lefthook](https://github.com/evilmartians/lefthook) to run li
 bun run prepare
 ```
 
-## Safety Features
-
-- **Backup branch**: Automatically creates `backup/<branch>/<timestamp>` before rewriting
-- **Content validation**: Verifies line content matches before replacement
-- **Remote warning**: Warns if repository has a remote upstream
-- **Force-push reminder**: Shows the exact command needed after rewrite
-
-## Privacy & Control
-
-- **Your data stays private**: All replacement text is entered via interactive prompts — nothing is passed as command-line arguments, so your private data will never be stored in shell history
-- **Full control**: You decide which commits to modify. Each commit is presented for confirmation with the exact lines it contains — no automatic rewrites, no black boxes
-- **Transparent process**: Every step is shown and requires your explicit approval before any changes are made
-
-## Limitations
-
-- One file per run
-- Literal replacements only (no regex)
-- Lines must be specified explicitly (no automatic detection)
-- May conflict if later commits modified the same lines
 
 ## License
 
