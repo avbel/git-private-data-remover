@@ -139,24 +139,34 @@ async function main(): Promise<void> {
     linesByCommit.set(line.commitHash, existing)
   }
 
+  const confirmedCommits = new Set<string>()
+
   for (const [commitHash, lines] of linesByCommit) {
     const { subject } = await getCommitInfo(commitHash)
     const confirmed = await confirmCommit(commitHash, subject, lines)
 
-    if (!confirmed) {
-      cancel('Operation cancelled by user')
-      process.exit(0)
+    if (confirmed) {
+      confirmedCommits.add(commitHash)
     }
   }
 
-  const replacements = await promptForReplacements(allLines)
+  if (confirmedCommits.size === 0) {
+    cancel('No commits selected for modification')
+    process.exit(0)
+  }
+
+  const filteredLines = allLines.filter(line => confirmedCommits.has(line.commitHash))
+
+  console.log(`\nProceeding with ${filteredLines.length} line(s) from ${confirmedCommits.size} commit(s)`)
+
+  const replacements = await promptForReplacements(filteredLines)
 
   if (replacements.size === 0) {
     cancel('No replacements specified')
     process.exit(0)
   }
 
-  const commitsToRewrite = await groupReplacementsByCommit(allLines, replacements)
+  const commitsToRewrite = await groupReplacementsByCommit(filteredLines, replacements)
 
   console.log(`\nWill rewrite ${commitsToRewrite.length} commit(s)`)
 

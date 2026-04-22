@@ -32,24 +32,17 @@ export async function confirmCommit(
   lines: LineInfo[],
 ): Promise<boolean> {
   console.log()
-  console.log(chalk.bold.blue(`${ICONS.info} Found lines in commit:`))
-  console.log(chalk.bold(`  ${commitHash.slice(0, 8)}: ${commitSubject}`))
+  console.log(chalk.bold.blue(`${ICONS.info} Commit ${commitHash.slice(0, 8)}: ${commitSubject}`))
   console.log()
 
-  const linesToShow = lines.slice(0, 3)
-
-  for (const line of linesToShow) {
+  for (const line of lines) {
     console.log(chalk.gray(`  Line ${line.originalLineNumber}: ${line.content.slice(0, 80)}`))
-  }
-
-  if (lines.length > 3) {
-    console.log(chalk.gray(`  ... and ${lines.length - 3} more line(s)`))
   }
 
   console.log()
 
   const modifyCommit = await confirm({
-    message: 'Modify this commit?',
+    message: 'These lines to replace?',
     initialValue: true,
   })
 
