@@ -29,7 +29,7 @@ function installSignalHandlers(): void {
     try {
       if (await isRebaseInProgress()) {
         await $`git rebase --abort`.quiet();
-        console.error('Rebase aborted.');
+        console.error(`${ICONS.error} Rebase aborted.`);
       }
     } catch {
       // best-effort
@@ -90,7 +90,7 @@ async function main(): Promise<void> {
   }
 
   if (!values.file || !values.lines || values.lines.trim() === '') {
-    console.error('Error: --file and --lines are required');
+    console.error(`${ICONS.error} Error: --file and --lines are required`);
     printUsage();
     process.exit(1);
   }
