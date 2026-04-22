@@ -9,14 +9,17 @@
     "test": "bun test",
     "lint": "bunx oxlint .",
     "lint:fix": "bunx oxlint . --fix",
+    "format": "bunx biome format .",
+    "format:fix": "bunx biome format --write .",
     "typecheck": "bunx tsc --noEmit",
     "prepare": "git rev-parse --git-dir > /dev/null 2>&1 && lefthook install || true"
   },
   "devDependencies": {
+    "@biomejs/biome": "^2.4.12",
     "@types/bun": "latest",
     "lefthook": "^2.1.6",
     "oxlint": "^1.61.0",
-    "typescript": "^5.8.0"
+    "typescript": "6.0.3"
   },
   "dependencies": {
     "@clack/prompts": "^1.2.0",

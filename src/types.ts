@@ -20,5 +20,3 @@ export interface CommitReplacements {
   commitHash: string;
   lines: Replacement[];
 }
-
-

@@ -1,7 +1,15 @@
 pre-commit:
+  parallel: true
   commands:
+    format:
+      glob: "*.{ts,js,json}"
+      run: bunx biome format --write {staged_files} && git add {staged_files}
     lint:
       glob: "*.{ts,js}"
-      run: bunx oxlint . --fix {staged_files} && git add {staged_files}
+      run: bunx oxlint --fix {staged_files} && git add {staged_files}
+    typecheck:
+      glob: "*.ts"
+      run: bunx tsc --noEmit
     test:
+      glob: "*.{ts,js}"
       run: bun test
