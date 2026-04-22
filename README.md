@@ -34,7 +34,7 @@ bun run src/index.ts -f <file> -l <line-spec> [options]
 | Flag | Description |
 |------|-------------|
 | `-f, --file <path>` | File containing private data (required) |
-| `-l, --lines <spec>` | Line number(s) to remove. Can be specified multiple times. Format: `10` for single line, `10-20` for range (required) |
+| `-l, --lines <spec>` | Line number(s) to remove. Use comma to separate multiple specs. Format: `10` for single line, `10-20` for range (required) |
 | `-w, --working-directory <path>` | Run git operations in the specified directory (defaults to current directory) |
 | `-d, --dry-run` | Show what would be changed without modifying history |
 | `-h, --help` | Show help message |
@@ -50,7 +50,7 @@ bun run src/index.ts -f config.json -l 15
 Remove multiple lines and ranges:
 
 ```bash
-bun run src/index.ts -f .env -l 5 -l 10-15
+bun run src/index.ts -f .env -l 5,10-15
 ```
 
 Dry-run to preview changes:

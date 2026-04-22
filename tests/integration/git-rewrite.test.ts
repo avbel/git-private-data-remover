@@ -58,7 +58,7 @@ describe('Git integration tests', () => {
     await $`git add test.txt`
     await $`git commit -m "Initial commit"`
 
-    const ranges = parseLineSpecs(['2'])
+    const ranges = parseLineSpecs('2')
     const info = await getLineBlameInfo('test.txt', ranges[0])
 
     expect(info).toHaveLength(1)
@@ -72,7 +72,7 @@ describe('Git integration tests', () => {
     await $`git add test.txt`
     await $`git commit -m "Initial commit"`
 
-    const ranges = parseLineSpecs(['2-4'])
+    const ranges = parseLineSpecs('2-4')
     const info = await getLineBlameInfo('test.txt', ranges[0])
 
     expect(info).toHaveLength(3)
@@ -86,7 +86,7 @@ describe('Git integration tests', () => {
     await $`git add test.txt`
     await $`git commit -m "Initial commit"`
 
-    const ranges = parseLineSpecs(['2'])
+    const ranges = parseLineSpecs('2')
     const info = await getLineBlameInfo('test.txt', ranges[0])
     const replacements = new Map([[2, 'SECRET_KEY=REDACTED']])
 
@@ -104,7 +104,7 @@ describe('Git integration tests', () => {
     await $`git add file1.txt file2.txt`
     await $`git commit -m "Add two files"`
 
-    const ranges = parseLineSpecs(['1'])
+    const ranges = parseLineSpecs('1')
     const info = await getLineBlameInfo('file1.txt', ranges[0])
 
     expect(info).toHaveLength(1)
@@ -120,7 +120,7 @@ describe('Git integration tests', () => {
     await $`git add test.txt`
     await $`git commit -m "Second commit"`
 
-    const ranges = parseLineSpecs(['1', '3'])
+    const ranges = parseLineSpecs('1,3')
     const info1 = await getLineBlameInfo('test.txt', ranges[0])
     const info3 = await getLineBlameInfo('test.txt', ranges[1])
 
@@ -136,7 +136,7 @@ describe('Git integration tests', () => {
     await $`git add secret.txt`
     await $`git commit -m "Add more data"`
 
-    const ranges = parseLineSpecs(['1'])
+    const ranges = parseLineSpecs('1')
     const info = await getLineBlameInfo('secret.txt', ranges[0])
     const replacements = new Map([[1, 'SECRET=REDACTED']])
     const commits = await groupReplacementsByCommit(info, replacements)

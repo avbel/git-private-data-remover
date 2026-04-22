@@ -36,7 +36,6 @@ async function main(): Promise<void> {
       lines: {
         type: 'string',
         short: 'l',
-        multiple: true,
       },
       'dry-run': {
         type: 'boolean',
@@ -62,7 +61,7 @@ async function main(): Promise<void> {
     process.exit(0)
   }
 
-  if (!values.file || !values.lines || values.lines.length === 0) {
+  if (!values.file || !values.lines || values.lines.trim() === '') {
     console.error('Error: --file and --lines are required')
     printUsage()
     process.exit(1)
@@ -107,7 +106,7 @@ async function main(): Promise<void> {
   }
 
   console.log(`Checking file: ${file}`)
-  console.log(`Line specs: ${lineSpecs.join(', ')}`)
+  console.log(`Line specs: ${lineSpecs}`)
 
   if (dryRun) {
     console.log('Running in DRY-RUN mode (no changes will be made)')

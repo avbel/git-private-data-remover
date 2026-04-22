@@ -48,19 +48,33 @@ describe('parseLineSpec', () => {
 })
 
 describe('parseLineSpecs', () => {
-  it('parses multiple specs', () => {
-    const result = parseLineSpecs(['10', '20-30'])
+  it('parses comma-separated specs', () => {
+    const result = parseLineSpecs('10,20-30')
     expect(result).toEqual([
       { start: 10, end: 10 },
       { start: 20, end: 30 },
     ])
   })
 
-  it('throws on empty array', () => {
-    expect(() => parseLineSpecs([])).toThrow('At least one line spec is required')
+  it('parses single spec', () => {
+    const result = parseLineSpecs('15')
+    expect(result).toEqual([{ start: 15, end: 15 }])
+  })
+
+  it('trims whitespace around commas', () => {
+    const result = parseLineSpecs('10 , 20-30 , 5')
+    expect(result).toEqual([
+      { start: 10, end: 10 },
+      { start: 20, end: 30 },
+      { start: 5, end: 5 },
+    ])
+  })
+
+  it('throws on empty string', () => {
+    expect(() => parseLineSpecs('')).toThrow('At least one line spec is required')
   })
 
   it('throws if any spec is invalid', () => {
-    expect(() => parseLineSpecs(['10', 'invalid'])).toThrow('Invalid line spec')
+    expect(() => parseLineSpecs('10,invalid')).toThrow('Invalid line spec')
   })
 })

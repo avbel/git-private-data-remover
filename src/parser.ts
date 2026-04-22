@@ -43,10 +43,10 @@ export function parseLineSpec(spec: string): LineRange {
   throw new Error(`Invalid line spec: "${spec}". Use "10" for a single line or "10-20" for a range`)
 }
 
-export function parseLineSpecs(specs: string[]): LineRange[] {
-  if (!specs || specs.length === 0) {
+export function parseLineSpecs(specs: string): LineRange[] {
+  if (!specs || specs.trim() === '') {
     throw new Error('At least one line spec is required')
   }
 
-  return specs.map(parseLineSpec)
+  return specs.split(',').map(s => parseLineSpec(s.trim()))
 }
