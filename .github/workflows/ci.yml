@@ -28,4 +28,4 @@ jobs:
         run: bun test
 
       - name: Check TypeScript compilation
-        run: npx tsc --noEmit
+        run: bunx tsc --noEmit

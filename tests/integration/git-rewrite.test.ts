@@ -9,6 +9,7 @@ import {
   getLineBlameInfo,
   groupReplacementsByCommit,
 } from '../../src/git-utils.ts'
+import { performRebase } from '../../src/rebase.ts'
 
 async function writeFile(path: string, content: string): Promise<void> {
   await Bun.write(path, content)
@@ -75,7 +76,7 @@ describe('Git integration tests', () => {
     const info = await getLineBlameInfo('test.txt', ranges[0])
     const replacements = new Map([[2, 'SECRET_KEY=REDACTED']])
 
-    const grouped = groupReplacementsByCommit(info, replacements)
+    const grouped = await groupReplacementsByCommit(info, replacements)
 
     expect(grouped).toHaveLength(1)
     expect(grouped[0].lines).toHaveLength(1)
@@ -110,5 +111,31 @@ describe('Git integration tests', () => {
     const info3 = await getLineBlameInfo('test.txt', ranges[1])
 
     expect(info1[0].commitHash).not.toBe(info3[0].commitHash)
+  })
+
+  it('performRebase rewrites history', async () => {
+    await writeFile('secret.txt', 'SECRET=old-value\nOTHER=keep\n')
+    await $`git add secret.txt`
+    await $`git commit -m "Add secret"`
+
+    await writeFile('secret.txt', 'SECRET=old-value\nOTHER=keep\nMORE=data\n')
+    await $`git add secret.txt`
+    await $`git commit -m "Add more data"`
+
+    const ranges = parseLineSpecs(['1'])
+    const info = await getLineBlameInfo('secret.txt', ranges[0])
+    const replacements = new Map([[1, 'SECRET=REDACTED']])
+    const commits = await groupReplacementsByCommit(info, replacements)
+
+    expect(commits).toHaveLength(1)
+
+    await performRebase(commits, 'secret.txt', false)
+
+    const blame = await getLineBlameInfo('secret.txt', ranges[0])
+    expect(blame[0].content).toBe('SECRET=REDACTED')
+
+    const log = await $`git log --oneline`.text()
+    expect(log).toContain('Add secret')
+    expect(log).toContain('Add more data')
   })
 })

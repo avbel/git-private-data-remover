@@ -58,6 +58,8 @@ export async function getLineBlameInfo(
         commitHash: currentCommit,
         originalLineNumber: currentOriginalLine,
       })
+      currentFinalLine++
+      currentOriginalLine++
     }
   }
 
@@ -72,6 +74,12 @@ export async function getFileAtCommit(
   return output.split('\n')
 }
 
+export async function getCommitInfo(commitHash: string): Promise<{ hash: string; subject: string }> {
+  const output = await $`git log -1 --format=%H%n%s ${commitHash}`.text()
+  const [hash, subject] = output.trim().split('\n')
+  return { hash: hash.trim(), subject: subject.trim() }
+}
+
 export async function createBackupBranch(originalBranch: string): Promise<string> {
   const timestamp = Date.now()
   const backupBranch = `backup/${originalBranch}/${timestamp}`
@@ -83,10 +91,10 @@ export async function getCurrentBranch(): Promise<string> {
   return (await $`git branch --show-current`.text()).trim()
 }
 
-export function groupReplacementsByCommit(
+export async function groupReplacementsByCommit(
   lineInfos: LineInfo[],
   replacements: Map<number, string>
-): CommitReplacements[] {
+): Promise<CommitReplacements[]> {
   const groups = new Map<string, Replacement[]>()
 
   for (const info of lineInfos) {
@@ -107,19 +115,30 @@ export function groupReplacementsByCommit(
     groups.set(info.commitHash, existing)
   }
 
-  return Array.from(groups.entries())
-    .map(([commitHash, lines]) => ({ commitHash, lines }))
-    .sort((a, b) => compareCommitOrder(a.commitHash, b.commitHash))
-}
+  const entries = Array.from(groups.entries()).map(([commitHash, lines]) => ({
+    commitHash,
+    lines,
+  }))
 
-async function compareCommitOrder(a: string, b: string): Promise<number> {
-  try {
-    const output = await $`git rev-list --ancestry-path ${a}..${b}`.text()
-    const count = output.trim().split('\n').filter(Boolean).length
-    return count > 0 ? -1 : 1
-  } catch {
-    return 0
+  if (entries.length <= 1) {
+    return entries
   }
+
+  const allCommits = entries.map(e => e.commitHash).join(' ')
+  const orderOutput = await $`git rev-list --reverse --no-walk ${allCommits}`.text()
+  const orderMap = new Map(
+    orderOutput
+      .trim()
+      .split('\n')
+      .filter(Boolean)
+      .map((hash, index) => [hash, index])
+  )
+
+  return entries.sort((a, b) => {
+    const orderA = orderMap.get(a.commitHash) ?? Infinity
+    const orderB = orderMap.get(b.commitHash) ?? Infinity
+    return orderA - orderB
+  })
 }
 
 export async function hasRemoteCommits(): Promise<boolean> {
@@ -129,6 +148,11 @@ export async function hasRemoteCommits(): Promise<boolean> {
   } catch {
     return false
   }
+}
+
+export async function isGitRepoClean(): Promise<boolean> {
+  const status = await $`git status --porcelain -uno`.text()
+  return status.trim() === ''
 }
 
 export async function runGitGc(): Promise<void> {

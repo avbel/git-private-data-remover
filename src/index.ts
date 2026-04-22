@@ -1,3 +1,4 @@
+import { $ } from 'bun'
 import { parseArgs } from 'util'
 import { parseLineSpecs } from './parser.ts'
 import {
@@ -7,14 +8,17 @@ import {
   createBackupBranch,
   getCurrentBranch,
   hasRemoteCommits,
+  isGitRepoClean,
   runGitGc,
+  getCommitInfo,
 } from './git-utils.ts'
 import {
   promptForReplacements,
   confirmAction,
-  confirmDryRun,
   outro,
   cancel,
+  ICONS,
+  confirmCommit,
 } from './prompts.ts'
 import { performRebase } from './rebase.ts'
 
@@ -61,9 +65,28 @@ async function main(): Promise<void> {
 
   await checkGitVersion(MIN_GIT_VERSION)
 
+  const isClean = await isGitRepoClean()
+  if (!isClean) {
+    console.error(`${ICONS.error} Git repository has uncommitted changes. Please commit or stash them before running this tool.`)
+    process.exit(1)
+  }
+
   const file = values.file
   const lineSpecs = values.lines
   const dryRun = values['dry-run']
+
+  const fileExists = await Bun.file(file).exists()
+  if (!fileExists) {
+    console.error(`${ICONS.error} File not found: ${file}`)
+    process.exit(1)
+  }
+
+  try {
+    await $`git ls-files --error-unmatch ${file}`
+  } catch {
+    console.error(`${ICONS.error} File is not tracked by git: ${file}`)
+    process.exit(1)
+  }
 
   console.log(`Checking file: ${file}`)
   console.log(`Line specs: ${lineSpecs.join(', ')}`)
@@ -92,6 +115,23 @@ async function main(): Promise<void> {
   const uniqueCommits = new Set(allLines.map(line => line.commitHash))
   console.log(`Spanning ${uniqueCommits.size} commit(s)`)
 
+  const linesByCommit = new Map<string, typeof allLines>()
+  for (const line of allLines) {
+    const existing = linesByCommit.get(line.commitHash) || []
+    existing.push(line)
+    linesByCommit.set(line.commitHash, existing)
+  }
+
+  for (const [commitHash, lines] of linesByCommit) {
+    const { subject } = await getCommitInfo(commitHash)
+    const confirmed = await confirmCommit(commitHash, subject, lines)
+
+    if (!confirmed) {
+      cancel('Operation cancelled by user')
+      process.exit(0)
+    }
+  }
+
   const replacements = await promptForReplacements(allLines)
 
   if (replacements.size === 0) {
@@ -99,13 +139,25 @@ async function main(): Promise<void> {
     process.exit(0)
   }
 
-  const commitsToRewrite = groupReplacementsByCommit(allLines, replacements)
+  const commitsToRewrite = await groupReplacementsByCommit(allLines, replacements)
 
   console.log(`\nWill rewrite ${commitsToRewrite.length} commit(s)`)
 
   for (const commit of commitsToRewrite) {
     console.log(`  Commit ${commit.commitHash.substring(0, 7)}: ${commit.lines.length} line(s)`)
   }
+
+  const hasRemote = await hasRemoteCommits()
+  const currentBranch = await getCurrentBranch()
+
+  if (hasRemote) {
+    console.warn(`\n${ICONS.warning} WARNING: This repository has a remote upstream.`)
+    console.warn('Rewriting history will require force-pushing to the remote.')
+    console.warn('This can affect other collaborators.')
+  }
+
+  console.log(`\n${ICONS.info} If anything goes wrong during the rebase, you can always reset to the current state with:`)
+  console.log(`  git reset --hard ${currentBranch}`)
 
   if (dryRun) {
     const proceed = await confirmAction('Proceed with dry-run?')
@@ -120,15 +172,6 @@ async function main(): Promise<void> {
     process.exit(0)
   }
 
-  const hasRemote = await hasRemoteCommits()
-
-  if (hasRemote) {
-    console.warn('\n⚠️  WARNING: This repository has a remote upstream.')
-    console.warn('Rewriting history will require force-pushing to the remote.')
-    console.warn('This can affect other collaborators.')
-  }
-
-  const currentBranch = await getCurrentBranch()
   const backupBranch = await createBackupBranch(currentBranch)
 
   console.log(`\nCreated backup branch: ${backupBranch}`)
@@ -146,20 +189,31 @@ async function main(): Promise<void> {
     await performRebase(commitsToRewrite, file, false)
     console.log('\nRebase completed successfully.')
 
+    const removeBackup = await confirmAction(
+      `Remove backup branch ${backupBranch}?`
+    )
+
+    if (removeBackup) {
+      await $`git branch -D ${backupBranch}`
+      console.log(`Backup branch ${backupBranch} removed.`)
+    }
+
     console.log('\nCompressing git storage...')
     await runGitGc()
     console.log('Git storage compressed.')
 
     if (hasRemote) {
-      console.warn('\n⚠️  Remember to force-push your changes:')
+      console.warn(`\n${ICONS.warning} Remember to force-push your changes:`)
       console.warn(`  git push --force-with-lease origin ${currentBranch}`)
     }
 
     outro('Done! Private data has been removed from git history.')
   } catch (error) {
-    console.error('\n❌ Error during rebase:', error instanceof Error ? error.message : String(error))
-    console.error(`\nYour original branch is backed up at: ${backupBranch}`)
-    console.error('To restore: git reset --hard ' + backupBranch)
+    console.error(`\n${ICONS.error} Error during rebase:`, error instanceof Error ? error.message : String(error))
+    console.error('\nRestoring from backup branch...')
+
+    await $`git reset --hard ${backupBranch}`
+    console.error(`Restored to backup branch: ${backupBranch}`)
     process.exit(1)
   }
 }

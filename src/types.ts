@@ -21,8 +21,4 @@ export interface CommitReplacements {
   lines: Replacement[];
 }
 
-export interface CliOptions {
-  file: string;
-  lineSpecs: string[];
-  dryRun: boolean;
-}
+

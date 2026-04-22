@@ -1,4 +1,6 @@
 import { $ } from 'bun'
+import { tmpdir } from 'os'
+import { join } from 'path'
 import type { CommitReplacements } from './types.ts'
 
 export async function rewriteCommit(
@@ -17,14 +19,14 @@ export async function rewriteCommit(
     return
   }
 
-  const fileContent = await getFileAtCommit(file, commitHash)
+  const fileContent = (await Bun.file(file).text()).split('\n')
 
   for (const replacement of replacements) {
     const lineIndex = replacement.lineNumber - 1
 
     if (lineIndex < 0 || lineIndex >= fileContent.length) {
       throw new Error(
-        `Line ${replacement.lineNumber} does not exist in commit ${commitHash}`
+        `Line ${replacement.lineNumber} does not exist in the current working tree file`
       )
     }
 
@@ -42,9 +44,13 @@ export async function rewriteCommit(
   await $`git commit --amend --no-edit --no-verify`
 }
 
-async function getFileAtCommit(file: string, commitHash: string): Promise<string[]> {
-  const output = await $`git show ${commitHash}:${file}`.text()
-  return output.split('\n')
+async function isRootCommit(commitHash: string): Promise<boolean> {
+  try {
+    await $`git rev-parse ${commitHash}^`
+    return false
+  } catch {
+    return true
+  }
 }
 
 export async function performRebase(
@@ -56,10 +62,12 @@ export async function performRebase(
     return
   }
 
-  const earliestCommit = commits[commits.length - 1].commitHash
-  const parentCommit = `${earliestCommit}^`
+  const earliestCommit = commits[0].commitHash
+  const root = await isRootCommit(earliestCommit)
 
-  const todoList = await generateTodoList(parentCommit)
+  const todoList = root
+    ? await generateTodoListForRoot()
+    : await generateTodoList(`${earliestCommit}^`)
   const modifiedTodo = modifyTodoForEdits(todoList, commits)
 
   if (dryRun) {
@@ -68,16 +76,20 @@ export async function performRebase(
     return
   }
 
-  const todoFile = `/tmp/git-rebase-todo-${Date.now()}`
+  const todoFile = join(tmpdir(), `git-rebase-todo-${Date.now()}`)
   await Bun.write(todoFile, modifiedTodo)
 
   const env = {
     ...process.env,
-    GIT_SEQUENCE_EDITOR: `cat ${todoFile} >`,
+    GIT_SEQUENCE_EDITOR: `cp -f "${todoFile}"`,
   }
 
   try {
-    await $`git rebase -i ${parentCommit}`.env(env)
+    if (root) {
+      await $`git rebase -i --root`.env(env)
+    } else {
+      await $`git rebase -i ${earliestCommit}^`.env(env)
+    }
 
     for (const commit of commits) {
       await rewriteCommit(commit.commitHash, file, commit.lines, false)
@@ -92,8 +104,15 @@ export async function performRebase(
 }
 
 async function generateTodoList(parentCommit: string): Promise<string> {
-  const output = await $`git rebase -i ${parentCommit}`.text()
-  return output
+  const format = 'pick %H %s'
+  const output = await $`git log --reverse --format=${format} ${parentCommit}..HEAD`.text()
+  return output.trim()
+}
+
+async function generateTodoListForRoot(): Promise<string> {
+  const format = 'pick %H %s'
+  const output = await $`git log --reverse --format=${format}`.text()
+  return output.trim()
 }
 
 function modifyTodoForEdits(todo: string, commits: CommitReplacements[]): string {

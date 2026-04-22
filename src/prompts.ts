@@ -1,68 +1,122 @@
-import * as p from '@clack/prompts'
+import { confirm, intro, isCancel, outro, cancel, text } from '@clack/prompts'
+import chalk from 'chalk'
+import { getTerminalInfo } from './terminal.ts'
 import type { LineInfo } from './types.ts'
-import { supportsUnicode } from './terminal.ts'
+
+const { supportsUnicode: unicodeEnabled } = getTerminalInfo()
 
 const ICONS = {
-  intro: supportsUnicode() ? '🔒' : '',
-  line: supportsUnicode() ? '📝' : '',
-  success: supportsUnicode() ? '✅' : '',
-  warning: supportsUnicode() ? '⚠️' : '',
-  error: supportsUnicode() ? '❌' : '',
-  info: supportsUnicode() ? 'ℹ️' : '',
-  question: supportsUnicode() ? '❓' : '',
+  success: unicodeEnabled ? '✓' : '[OK]',
+  error: unicodeEnabled ? '✗' : '[ERR]',
+  warning: unicodeEnabled ? '⚠' : '[WARN]',
+  info: unicodeEnabled ? 'ℹ' : '[INFO]',
 }
 
-export async function promptForReplacements(lines: LineInfo[]): Promise<Map<number, string>> {
+export { outro, cancel, ICONS }
+
+export async function showIntro(): Promise<void> {
+  intro(
+    `${chalk.bold.blue('Git Private Data Remover')}
+${chalk.gray('Remove accidentally committed private data from git history')}`
+  )
+}
+
+export async function confirmAction(message: string): Promise<boolean> {
+  const result = await confirm({ message, initialValue: false })
+  return result === true
+}
+
+export async function confirmCommit(
+  commitHash: string,
+  commitSubject: string,
+  lines: LineInfo[],
+): Promise<boolean> {
+  console.log()
+  console.log(chalk.bold.blue(`${ICONS.info} Found lines in commit:`))
+  console.log(chalk.bold(`  ${commitHash.slice(0, 8)}: ${commitSubject}`))
+  console.log()
+
+  const linesToShow = lines.slice(0, 3)
+
+  for (const line of linesToShow) {
+    console.log(chalk.gray(`  Line ${line.originalLineNumber}: ${line.content.slice(0, 80)}`))
+  }
+
+  if (lines.length > 3) {
+    console.log(chalk.gray(`  ... and ${lines.length - 3} more line(s)`))
+  }
+
+  console.log()
+
+  const modifyCommit = await confirm({
+    message: 'Modify this commit?',
+    initialValue: true,
+  })
+
+  return modifyCommit === true
+}
+
+export async function promptForReplacements(
+  allLines: LineInfo[],
+): Promise<Map<number, string>> {
   const replacements = new Map<number, string>()
 
-  p.intro(`${ICONS.intro} Git Private Data Remover`)
+  for (const line of allLines) {
+    console.log()
+    console.log(chalk.bold.blue(`${ICONS.info} Line ${line.lineNumber}:`))
+    console.log(chalk.gray(`  Current: ${line.content}`))
+    console.log(chalk.gray(`  Commit: ${line.commitHash.slice(0, 8)}`))
 
-  for (const line of lines) {
-    const replacement = await p.text({
-      message: `${ICONS.line} Line ${line.lineNumber} (commit ${line.commitHash.substring(0, 7)}):\n  Current: ${line.content}\n  Enter replacement text (or press Enter to keep):`,
-      initialValue: '',
-      validate(value) {
-        if (value === line.content) {
-          return 'Replacement cannot be the same as the original content'
-        }
-      },
-    })
+    const replacement = await promptMultiline(line.lineNumber)
 
-    if (p.isCancel(replacement)) {
-      p.cancel('Operation cancelled')
-      process.exit(0)
+    if (replacement === null) {
+      throw new Error('Replacement cancelled by user')
     }
 
-    if (replacement && replacement.trim() !== '') {
-      replacements.set(line.lineNumber, replacement)
-    }
+    replacements.set(line.lineNumber, replacement)
   }
 
   return replacements
 }
 
-export async function confirmAction(message: string): Promise<boolean> {
-  const confirmed = await p.confirm({
-    message,
-    initialValue: false,
-  })
+async function promptMultiline(lineNumber: number): Promise<string | null> {
+  const lines: string[] = []
 
-  if (p.isCancel(confirmed)) {
-    p.cancel('Operation cancelled')
-    process.exit(0)
+  while (true) {
+    const promptMessage =
+      lines.length === 0
+        ? `Enter replacement for line ${lineNumber} (empty line to finish):`
+        : `Continue line ${lineNumber} (empty line to finish):`
+
+    const answer = await text({
+      message: promptMessage,
+      placeholder: '',
+    })
+
+    if (isCancel(answer)) {
+      return null
+    }
+
+    if (answer === '') {
+      break
+    }
+
+    lines.push(answer)
   }
 
-  return confirmed
+  if (lines.length === 0) {
+    console.log(chalk.yellow(`${ICONS.warning} No replacement entered, skipping line ${lineNumber}`))
+    return ''
+  }
+
+  return lines.join('\n')
 }
 
 export async function confirmDryRun(): Promise<boolean> {
-  return confirmAction(`${ICONS.question} Run in dry-run mode? (show plan without modifying history)`)
-}
+  const dryRun = await confirm({
+    message: 'Run in dry-run mode (no changes will be made)?',
+    initialValue: true,
+  })
 
-export function outro(message: string): void {
-  p.outro(message)
-}
-
-export function cancel(message: string): void {
-  p.cancel(message)
+  return dryRun === true
 }
