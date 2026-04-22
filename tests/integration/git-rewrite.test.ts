@@ -11,6 +11,20 @@ import {
 } from '../../src/git-utils.ts'
 import { performRebase } from '../../src/rebase.ts'
 
+async function spawnCli(args: string[], cwd: string): Promise<{ exitCode: number | null; stdout: string; stderr: string }> {
+  const proc = Bun.spawn(['bun', 'run', 'src/index.ts', ...args], {
+    cwd,
+    stdout: 'pipe',
+    stderr: 'pipe',
+  })
+
+  const exitCode = await proc.exited
+  const stdout = new TextDecoder().decode(await Bun.readableStreamToArrayBuffer(proc.stdout))
+  const stderr = new TextDecoder().decode(await Bun.readableStreamToArrayBuffer(proc.stderr))
+
+  return { exitCode, stdout, stderr }
+}
+
 async function writeFile(path: string, content: string): Promise<void> {
   await Bun.write(path, content)
 }
@@ -137,5 +151,52 @@ describe('Git integration tests', () => {
     const log = await $`git log --oneline`.text()
     expect(log).toContain('Add secret')
     expect(log).toContain('Add more data')
+  })
+})
+
+describe('Working directory flag', () => {
+  let tempDir: string
+  let projectRoot: string
+
+  beforeEach(() => {
+    projectRoot = process.cwd()
+    tempDir = mkdtempSync(join(tmpdir(), 'git-private-data-remover-'))
+  })
+
+  afterEach(() => {
+    rmSync(tempDir, { recursive: true, force: true })
+  })
+
+  it('accepts --help with working directory', async () => {
+    const { exitCode, stdout } = await spawnCli(['-w', tempDir, '--help'], projectRoot)
+
+    expect(exitCode).toBe(0)
+    expect(stdout).toContain('Git Private Data Remover')
+  })
+
+  it('fails with non-existent working directory', async () => {
+    const nonExistentDir = join(tempDir, 'does-not-exist')
+
+    const { exitCode, stderr } = await spawnCli(['-w', nonExistentDir, '-f', 'file.txt', '-l', '1'], projectRoot)
+
+    expect(exitCode).toBe(1)
+    expect(stderr).toContain('Working directory not found')
+  })
+
+  it('operates in specified working directory', async () => {
+    process.chdir(tempDir)
+    await $`git init`
+    await $`git config user.email "test@example.com"`
+    await $`git config user.name "Test User"`
+    await writeFile('secret.txt', 'SECRET=old\n')
+    await $`git add secret.txt`
+    await $`git commit -m "Add secret"`
+    await writeFile('secret.txt', 'modified\n')
+    process.chdir(projectRoot)
+
+    const { exitCode, stderr } = await spawnCli(['-w', tempDir, '-f', 'secret.txt', '-l', '1'], projectRoot)
+
+    expect(exitCode).toBe(1)
+    expect(stderr).toContain('Git repository has uncommitted changes')
   })
 })

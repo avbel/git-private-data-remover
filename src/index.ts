@@ -1,5 +1,6 @@
 import { $ } from 'bun'
 import { parseArgs } from 'util'
+import { existsSync, statSync } from 'fs'
 import { parseLineSpecs } from './parser.ts'
 import {
   checkGitVersion,
@@ -69,7 +70,7 @@ async function main(): Promise<void> {
 
   if (values['working-directory']) {
     const cwd = values['working-directory']
-    const dirExists = await Bun.file(cwd).exists()
+    const dirExists = existsSync(cwd) && statSync(cwd).isDirectory()
 
     if (!dirExists) {
       console.error(`${ICONS.error} Working directory not found: ${cwd}`)
