@@ -25,13 +25,6 @@ A TypeScript/Bun CLI tool to remove accidentally committed private data from git
 - **Full control**: You decide which commits to modify. Each commit is presented for confirmation with the exact lines it contains — no automatic rewrites, no black boxes
 - **Transparent process**: Every step is shown and requires your explicit approval before any changes are made
 
-## Limitations
-
-- One file per run
-- Literal replacements only (no regex)
-- Lines must be specified explicitly (no automatic detection)
-- May conflict if later commits modified the same lines
-
 
 ## Prerequisites
 
