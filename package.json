@@ -1,0 +1,23 @@
+{
+  "name": "git-private-data-remover",
+  "version": "1.0.0",
+  "description": "CLI tool to remove accidentally committed private data from git history",
+  "module": "src/index.ts",
+  "type": "module",
+  "scripts": {
+    "start": "bun run src/index.ts",
+    "test": "bun test",
+    "lint": "npx oxlint .",
+    "lint:fix": "npx oxlint . --fix",
+    "prepare": "git rev-parse --git-dir > /dev/null 2>&1 && lefthook install || true"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "lefthook": "^1.6.0",
+    "oxlint": "^0.2.0",
+    "typescript": "^6.0.0"
+  },
+  "dependencies": {
+    "@clack/prompts": "^0.7.0"
+  }
+}

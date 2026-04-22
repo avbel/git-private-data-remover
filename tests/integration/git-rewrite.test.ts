@@ -1,0 +1,114 @@
+import { describe, it, expect, beforeEach, afterEach } from 'bun:test'
+import { $ } from 'bun'
+import { mkdtempSync, rmSync } from 'fs'
+import { tmpdir } from 'os'
+import { join } from 'path'
+import { parseLineSpecs } from '../../src/parser.ts'
+import {
+  checkGitVersion,
+  getLineBlameInfo,
+  groupReplacementsByCommit,
+} from '../../src/git-utils.ts'
+
+async function writeFile(path: string, content: string): Promise<void> {
+  await Bun.write(path, content)
+}
+
+describe('Git integration tests', () => {
+  let tempDir: string
+  let originalCwd: string
+
+  beforeEach(async () => {
+    originalCwd = process.cwd()
+    tempDir = mkdtempSync(join(tmpdir(), 'git-private-data-remover-'))
+    process.chdir(tempDir)
+
+    await $`git init`
+    await $`git config user.email "test@example.com"`
+    await $`git config user.name "Test User"`
+  })
+
+  afterEach(() => {
+    process.chdir(originalCwd)
+    rmSync(tempDir, { recursive: true, force: true })
+  })
+
+  it('detects git version', async () => {
+    await expect(checkGitVersion('1.0.0')).resolves.toBeUndefined()
+    await expect(checkGitVersion('99.99.99')).rejects.toThrow()
+  })
+
+  it('gets blame info for single line', async () => {
+    await writeFile('test.txt', 'line1\nline2\nline3\n')
+    await $`git add test.txt`
+    await $`git commit -m "Initial commit"`
+
+    const ranges = parseLineSpecs(['2'])
+    const info = await getLineBlameInfo('test.txt', ranges[0])
+
+    expect(info).toHaveLength(1)
+    expect(info[0].content).toBe('line2')
+    expect(info[0].lineNumber).toBe(2)
+    expect(info[0].commitHash).toMatch(/^[a-f0-9]{40}$/)
+  })
+
+  it('gets blame info for range', async () => {
+    await writeFile('test.txt', 'line1\nline2\nline3\nline4\nline5\n')
+    await $`git add test.txt`
+    await $`git commit -m "Initial commit"`
+
+    const ranges = parseLineSpecs(['2-4'])
+    const info = await getLineBlameInfo('test.txt', ranges[0])
+
+    expect(info).toHaveLength(3)
+    expect(info[0].content).toBe('line2')
+    expect(info[1].content).toBe('line3')
+    expect(info[2].content).toBe('line4')
+  })
+
+  it('groups replacements by commit', async () => {
+    await writeFile('test.txt', 'line1\nSECRET_KEY=abc123\nline3\n')
+    await $`git add test.txt`
+    await $`git commit -m "Initial commit"`
+
+    const ranges = parseLineSpecs(['2'])
+    const info = await getLineBlameInfo('test.txt', ranges[0])
+    const replacements = new Map([[2, 'SECRET_KEY=REDACTED']])
+
+    const grouped = groupReplacementsByCommit(info, replacements)
+
+    expect(grouped).toHaveLength(1)
+    expect(grouped[0].lines).toHaveLength(1)
+    expect(grouped[0].lines[0].originalContent).toBe('SECRET_KEY=abc123')
+    expect(grouped[0].lines[0].replacementContent).toBe('SECRET_KEY=REDACTED')
+  })
+
+  it('handles multiple files in same commit', async () => {
+    await writeFile('file1.txt', 'content1\n')
+    await writeFile('file2.txt', 'content2\n')
+    await $`git add file1.txt file2.txt`
+    await $`git commit -m "Add two files"`
+
+    const ranges = parseLineSpecs(['1'])
+    const info = await getLineBlameInfo('file1.txt', ranges[0])
+
+    expect(info).toHaveLength(1)
+    expect(info[0].content).toBe('content1')
+  })
+
+  it('handles multiple commits', async () => {
+    await writeFile('test.txt', 'line1\nline2\n')
+    await $`git add test.txt`
+    await $`git commit -m "First commit"`
+
+    await writeFile('test.txt', 'line1\nline2\nline3\n')
+    await $`git add test.txt`
+    await $`git commit -m "Second commit"`
+
+    const ranges = parseLineSpecs(['1', '3'])
+    const info1 = await getLineBlameInfo('test.txt', ranges[0])
+    const info3 = await getLineBlameInfo('test.txt', ranges[1])
+
+    expect(info1[0].commitHash).not.toBe(info3[0].commitHash)
+  })
+})

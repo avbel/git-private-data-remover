@@ -1,0 +1,12 @@
+commit-msg:
+  commands:
+    lint:
+      run: npx oxlint . --fix
+
+pre-commit:
+  commands:
+    lint:
+      glob: "*.{ts,js}"
+      run: npx oxlint . --fix {staged_files} && git add {staged_files}
+    test:
+      run: bun test
