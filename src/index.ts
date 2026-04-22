@@ -42,6 +42,10 @@ async function main(): Promise<void> {
         short: 'd',
         default: false,
       },
+      'working-directory': {
+        type: 'string',
+        short: 'w',
+      },
       help: {
         type: 'boolean',
         short: 'h',
@@ -61,6 +65,19 @@ async function main(): Promise<void> {
     console.error('Error: --file and --lines are required')
     printUsage()
     process.exit(1)
+  }
+
+  if (values['working-directory']) {
+    const cwd = values['working-directory']
+    const dirExists = await Bun.file(cwd).exists()
+
+    if (!dirExists) {
+      console.error(`${ICONS.error} Working directory not found: ${cwd}`)
+      process.exit(1)
+    }
+
+    process.chdir(cwd)
+    console.log(`Working directory: ${cwd}`)
   }
 
   await checkGitVersion(MIN_GIT_VERSION)

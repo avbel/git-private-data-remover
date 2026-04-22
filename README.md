@@ -35,6 +35,7 @@ bun run src/index.ts -f <file> -l <line-spec> [options]
 |------|-------------|
 | `-f, --file <path>` | File containing private data (required) |
 | `-l, --lines <spec>` | Line number(s) to remove. Can be specified multiple times. Format: `10` for single line, `10-20` for range (required) |
+| `-w, --working-directory <path>` | Run git operations in the specified directory (defaults to current directory) |
 | `-d, --dry-run` | Show what would be changed without modifying history |
 | `-h, --help` | Show help message |
 
@@ -56,6 +57,12 @@ Dry-run to preview changes:
 
 ```bash
 bun run src/index.ts -f secrets.txt -l 3-7 --dry-run
+```
+
+Run in a different repository:
+
+```bash
+bun run src/index.ts -w /path/to/repo -f config.json -l 15
 ```
 
 ## How It Works
