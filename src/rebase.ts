@@ -8,20 +8,7 @@ export async function rewriteCommit(
   commitHash: string,
   file: string,
   replacements: CommitReplacements['lines'],
-  dryRun: boolean,
 ): Promise<void> {
-  if (dryRun) {
-    console.log(`  [DRY RUN] Would edit commit ${commitHash}:`);
-
-    for (const replacement of replacements) {
-      console.log(
-        `    Line ${replacement.lineNumber}: "${replacement.originalContent}" -> "${replacement.replacementContent}"`,
-      );
-    }
-
-    return;
-  }
-
   const committedContent = (await $`git show HEAD:${file}`.text()).split('\n');
   const workingContent = (await Bun.file(file).text()).split('\n');
 
@@ -88,7 +75,7 @@ export async function performRebase(commits: CommitReplacements[], file: string,
     }
 
     for (const commit of commits) {
-      await rewriteCommit(commit.commitHash, file, commit.lines, false);
+      await rewriteCommit(commit.commitHash, file, commit.lines);
       await $`git rebase --continue`.env(env);
     }
   } catch (error) {
