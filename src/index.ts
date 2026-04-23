@@ -253,6 +253,7 @@ async function main(): Promise<void> {
   const backupBranch = await createBackupBranch(currentBranch);
 
   console.log(`\nCreated backup branch: ${backupBranch}`);
+  console.log(`If anything goes wrong, recover with: git reset --hard ${backupBranch}`);
 
   const proceed = await confirmAction(
     `Are you sure you want to rewrite history? This will modify ${commitsToRewrite.length} commit(s).`,

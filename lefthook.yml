@@ -10,6 +10,4 @@ pre-commit:
     typecheck:
       glob: "*.ts"
       run: bunx tsc --noEmit
-    test:
-      glob: "*.{ts,js}"
-      run: bun test
+

@@ -1,11 +1,12 @@
 import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
 import { $ } from 'bun';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { parseLineSpecs } from '../../src/parser.ts';
 import { checkGitVersion, getLineBlameInfo, groupReplacementsByCommit } from '../../src/git-utils.ts';
 import { performRebase } from '../../src/rebase.ts';
+import type { CommitReplacements } from '../../src/types.ts';
 
 async function spawnCli(
   args: string[],
@@ -153,6 +154,256 @@ describe('Git integration tests', () => {
     const log = await $`git log --oneline`.text();
     expect(log).toContain('Add secret');
     expect(log).toContain('Add more data');
+  });
+
+  it('rewrites middle commit when private data is not in first commit', async () => {
+    await writeFile('data.txt', 'safe1\nsafe2\n');
+    await $`git add data.txt`;
+    await $`git commit -m "Add safe data"`;
+
+    await writeFile('data.txt', 'safe1\nSECRET=abc\nsafe2\n');
+    await $`git add data.txt`;
+    await $`git commit -m "Add secret"`;
+
+    await writeFile('data.txt', 'safe1\nSECRET=abc\nsafe2\nsafe3\n');
+    await $`git add data.txt`;
+    await $`git commit -m "Add more data"`;
+
+    const logBefore = await $`git log --reverse --format=%H`.text();
+    const allCommits = logBefore.trim().split('\n');
+    expect(allCommits).toHaveLength(3);
+
+    const ranges = parseLineSpecs('2');
+    const info = await getLineBlameInfo('data.txt', ranges[0]);
+    const replacements = new Map([[2, 'REDACTED']]);
+    const commits = await groupReplacementsByCommit(info, replacements);
+
+    expect(commits).toHaveLength(1);
+    expect(commits[0].commitHash).toBe(allCommits[1]);
+    expect(commits[0].commitHash).not.toBe(allCommits[0]);
+
+    await performRebase(commits, 'data.txt', false);
+
+    const commit1Content = await $`git show ${allCommits[0]}:data.txt`.text();
+    expect(commit1Content).toBe('safe1\nsafe2\n');
+
+    const commit2Content = await $`git show HEAD~1:data.txt`.text();
+    expect(commit2Content).toBe('safe1\nREDACTED\nsafe2\n');
+
+    const headContent = await $`git show HEAD:data.txt`.text();
+    expect(headContent).toBe('safe1\nREDACTED\nsafe2\nsafe3\n');
+
+    const newLog = await $`git log --oneline`.text();
+    expect(newLog.split('\n').filter(Boolean)).toHaveLength(3);
+  });
+
+  it('only modifies target commit when file changes in several commits', async () => {
+    const lines = Array.from({ length: 10 }, (_, i) => `line${i + 1}`);
+    await writeFile('multi.txt', lines.join('\n') + '\n');
+    await $`git add multi.txt`;
+    await $`git commit -m "Initial file"`;
+
+    lines[4] = 'SECRET=123';
+    await writeFile('multi.txt', lines.join('\n') + '\n');
+    await $`git add multi.txt`;
+    await $`git commit -m "Add secret to line 5"`;
+
+    lines[9] = 'modified-line10';
+    await writeFile('multi.txt', lines.join('\n') + '\n');
+    await $`git add multi.txt`;
+    await $`git commit -m "Modify line 10"`;
+
+    lines[8] = 'modified-line9';
+    await writeFile('multi.txt', lines.join('\n') + '\n');
+    await $`git add multi.txt`;
+    await $`git commit -m "Modify line 9"`;
+
+    const logBefore = await $`git log --reverse --format=%H`.text();
+    const allCommits = logBefore.trim().split('\n');
+
+    const ranges = parseLineSpecs('5');
+    const info = await getLineBlameInfo('multi.txt', ranges[0]);
+    const replacements = new Map([[5, 'REDACTED']]);
+    const commits = await groupReplacementsByCommit(info, replacements);
+
+    expect(commits).toHaveLength(1);
+    expect(commits[0].commitHash).toBe(allCommits[1]);
+
+    await performRebase(commits, 'multi.txt', false);
+
+    const commit1Content = await $`git show ${allCommits[0]}:multi.txt`.text();
+    expect(commit1Content).toBe(Array.from({ length: 10 }, (_, i) => `line${i + 1}`).join('\n') + '\n');
+
+    const commit2Content = await $`git show HEAD~2:multi.txt`.text();
+    const expectedCommit2 =
+      Array.from({ length: 10 }, (_, i) => (i === 4 ? 'REDACTED' : `line${i + 1}`)).join('\n') + '\n';
+    expect(commit2Content).toBe(expectedCommit2);
+
+    const commit3Content = await $`git show HEAD~1:multi.txt`.text();
+    const expectedCommit3 =
+      Array.from({ length: 10 }, (_, i) => {
+        if (i === 4) return 'REDACTED';
+        if (i === 9) return 'modified-line10';
+        return `line${i + 1}`;
+      }).join('\n') + '\n';
+    expect(commit3Content).toBe(expectedCommit3);
+
+    const headContent = await $`git show HEAD:multi.txt`.text();
+    const expectedHead =
+      Array.from({ length: 10 }, (_, i) => {
+        if (i === 4) return 'REDACTED';
+        if (i === 8) return 'modified-line9';
+        if (i === 9) return 'modified-line10';
+        return `line${i + 1}`;
+      }).join('\n') + '\n';
+    expect(headContent).toBe(expectedHead);
+
+    const newLog = await $`git log --oneline`.text();
+    expect(newLog.split('\n').filter(Boolean)).toHaveLength(4);
+  });
+
+  it('edits only adding commit when private data was later removed', async () => {
+    const lines = Array.from({ length: 10 }, (_, i) => `line${i + 1}`);
+    await writeFile('data.txt', lines.join('\n') + '\n');
+    await $`git add data.txt`;
+    await $`git commit -m "Initial file"`;
+
+    lines[4] = 'API_KEY=secret123';
+    await writeFile('data.txt', lines.join('\n') + '\n');
+    await $`git add data.txt`;
+    await $`git commit -m "Add secret"`;
+
+    lines.pop();
+    await writeFile('data.txt', lines.join('\n') + '\n');
+    await $`git add data.txt`;
+    await $`git commit -m "Remove last line"`;
+
+    const logBefore = await $`git log --reverse --format=%H`.text();
+    const allCommits = logBefore.trim().split('\n');
+    expect(allCommits).toHaveLength(3);
+
+    const commitWithSecret = allCommits[1];
+
+    const commitGroup = {
+      commitHash: commitWithSecret,
+      commitSubject: 'Add secret',
+      lines: [
+        {
+          lineNumber: 5,
+          originalContent: 'API_KEY=secret123',
+          replacementContent: 'REDACTED',
+        },
+      ],
+    };
+
+    await performRebase([commitGroup], 'data.txt', false);
+
+    const commit1Content = await $`git show ${allCommits[0]}:data.txt`.text();
+    expect(commit1Content).toBe(Array.from({ length: 10 }, (_, i) => `line${i + 1}`).join('\n') + '\n');
+
+    const commit2Content = await $`git show HEAD~1:data.txt`.text();
+    const expectedCommit2 =
+      Array.from({ length: 10 }, (_, i) => (i === 4 ? 'REDACTED' : `line${i + 1}`)).join('\n') + '\n';
+    expect(commit2Content).toBe(expectedCommit2);
+
+    const headContent = await $`git show HEAD:data.txt`.text();
+    const expectedHead = Array.from({ length: 9 }, (_, i) => (i === 4 ? 'REDACTED' : `line${i + 1}`)).join('\n') + '\n';
+    expect(headContent).toBe(expectedHead);
+
+    const allCommitHashes = (await $`git rev-list --all`.text()).trim().split('\n');
+    for (const commit of allCommitHashes) {
+      const showResult = await $`git show ${commit}:data.txt`.nothrow();
+      if (showResult.exitCode === 0) {
+        expect(showResult.text()).not.toContain('API_KEY=secret123');
+      }
+    }
+  });
+
+  it('handles private data that was modified and removed in later commits (empty replacement)', async () => {
+    const file = 'config.txt';
+    const filePath = join(tempDir, file);
+
+    const lines1 = Array.from({ length: 15 }, (_, i) => `line${i + 1}`);
+    await Bun.write(filePath, lines1.join('\n'));
+    await $`git add ${file}`;
+    await $`git commit -m "Initial commit"`;
+
+    const lines2 = [...lines1];
+    lines2[4] = 'SECRET=first_value';
+    await Bun.write(filePath, lines2.join('\n'));
+    await $`git add ${file}`;
+    await $`git commit -m "Add secret"`;
+
+    const lines3 = [...lines2];
+    lines3[4] = 'SECRET=second_value';
+    await Bun.write(filePath, lines3.join('\n'));
+    await $`git add ${file}`;
+    await $`git commit -m "Change secret value"`;
+
+    const lines4 = [...lines3];
+    lines4[4] = 'SECRET=third_value';
+    await Bun.write(filePath, lines4.join('\n'));
+    await $`git add ${file}`;
+    await $`git commit -m "Change secret again"`;
+
+    const lines5 = [...lines4];
+    lines5.splice(4, 1);
+    await Bun.write(filePath, lines5.join('\n'));
+    await $`git add ${file}`;
+    await $`git commit -m "Remove secret"`;
+
+    const logOutput = await $`git log --reverse --format=%H`.text();
+    const [, c2] = logOutput.trim().split('\n');
+
+    await $`git branch backup-before-rebase`;
+
+    const commitGroup: CommitReplacements[] = [
+      {
+        commitHash: c2,
+        lines: [
+          {
+            lineNumber: 5,
+            originalContent: 'SECRET=first_value',
+            replacementContent: '',
+          },
+        ],
+      },
+    ];
+
+    let rebaseFailed = false;
+    try {
+      await performRebase(commitGroup, file, false);
+
+      const gitDir = await $`git rev-parse --git-dir`.text();
+      const rebaseMergeDir = join(tempDir, gitDir.trim(), 'rebase-merge');
+      const rebaseApplyDir = join(tempDir, gitDir.trim(), 'rebase-apply');
+
+      if (existsSync(rebaseMergeDir) || existsSync(rebaseApplyDir)) {
+        rebaseFailed = true;
+        await $`git rebase --abort`.quiet();
+      }
+    } catch {
+      rebaseFailed = true;
+      try {
+        await $`git rebase --abort`.quiet();
+      } catch {
+        // rebase may not be in progress
+      }
+    }
+
+    await $`git reset --hard backup-before-rebase`;
+
+    const originalLog = await $`git log --oneline`.text();
+    expect(originalLog).toContain('Initial commit');
+    expect(originalLog).toContain('Add secret');
+    expect(originalLog).toContain('Change secret value');
+    expect(originalLog).toContain('Change secret again');
+    expect(originalLog).toContain('Remove secret');
+
+    const status = await $`git status --porcelain`.text();
+    expect(status).toBe('');
+
+    expect(rebaseFailed).toBe(true);
   });
 });
 
