@@ -8,8 +8,6 @@ A TypeScript/Bun CLI tool to remove accidentally committed private data from git
 - **Interactive prompts**: Asks for replacement text for each line
 - **Dry-run mode**: Preview changes without modifying history
 - **Automatic backup**: Creates a backup branch before rewriting
-- **Force-push warning**: Detects remote upstream and warns about force-push requirements
-- **Git version check**: Verifies git supports required features
 - **Storage cleanup**: Compresses git storage to remove traces of old data
 
 ## Safety Features
