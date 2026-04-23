@@ -49,7 +49,7 @@ bun run src/index.ts -w <working-directory> -f <file> -l <line-spec> [options]
 |------|-------------|
 | `-w, --working-directory <path>` | Directory of the git repository to operate on (required) |
 | `-f, --file <path>` | File containing private data (required) |
-| `-l, --lines <spec>` | Line number(s) to remove. Use comma to separate multiple specs. Format: `10` for single line, `10-20` for range (required) |
+| `-l, --lines <spec>` | Line number(s) to remove.  Format: `10` for single line, `10-20` for range (required) |
 | `-d, --dry-run` | Show what would be changed without modifying history |
 | `-h, --help` | Show help message |
 
