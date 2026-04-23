@@ -405,6 +405,50 @@ describe('Git integration tests', () => {
 
     expect(rebaseFailed).toBe(true);
   });
+
+  it('supports multiline replacement content', async () => {
+    process.chdir(tempDir);
+    await $`git init`;
+    await $`git config user.email "test@example.com"`;
+    await $`git config user.name "Test User"`;
+
+    await writeFile('config.txt', 'line1\nline2\nline3\nline4\nline5\n');
+    await $`git add config.txt`;
+    await $`git commit -m "Initial commit"`;
+
+    await writeFile('config.txt', 'line1\nline2\nSECRET=top_secret\nline4\nline5\n');
+    await $`git add config.txt`;
+    await $`git commit -m "Add secret"`;
+
+    const logOutput = await $`git log --reverse --format=%H`.text();
+    const [, c2] = logOutput.trim().split('\n');
+
+    const commitGroup: CommitReplacements[] = [
+      {
+        commitHash: c2,
+        lines: [
+          {
+            lineNumber: 3,
+            originalContent: 'SECRET=top_secret',
+            replacementContent: 'REDACTED_LINE_1\nREDACTED_LINE_2\nREDACTED_LINE_3',
+          },
+        ],
+      },
+    ];
+
+    await performRebase(commitGroup, 'config.txt', false);
+
+    const finalContent = await $`git show HEAD:config.txt`.text();
+    expect(finalContent).toBe('line1\nline2\nREDACTED_LINE_1\nREDACTED_LINE_2\nREDACTED_LINE_3\nline4\nline5\n');
+
+    const log = await $`git log --oneline`.text();
+    expect(log).toContain('Initial commit');
+    expect(log).toContain('Add secret');
+    expect(log).not.toContain('SECRET=top_secret');
+
+    const blameOutput = await $`git blame config.txt`.text();
+    expect(blameOutput).not.toContain('SECRET=top_secret');
+  });
 });
 
 describe('Working directory flag', () => {
