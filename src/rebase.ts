@@ -2,6 +2,7 @@ import { $ } from 'bun';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { unlink } from 'node:fs/promises';
+import { ICONS } from './prompts.ts';
 import type { CommitReplacements } from './types.ts';
 
 export async function rewriteCommit(
@@ -117,4 +118,52 @@ function modifyTodoForEdits(todo: string, commits: CommitReplacements[]): string
       return line;
     })
     .join('\n');
+}
+
+async function isFilterRepoAvailable(): Promise<boolean> {
+  try {
+    const result = await $`git filter-repo --help`.nothrow().quiet();
+    return result.exitCode === 0;
+  } catch {
+    return false;
+  }
+}
+
+export async function performFileRemoval(filePath: string, dryRun: boolean): Promise<void> {
+  if (dryRun) {
+    console.log(`\n[DRY RUN] Would remove ${filePath} from all history`);
+    return;
+  }
+
+  const filterRepoAvailable = await isFilterRepoAvailable();
+
+  if (filterRepoAvailable) {
+    console.log(`Using git filter-repo to remove ${filePath}...`);
+    await $`git filter-repo --force --path ${filePath} --invert-paths`.quiet();
+  } else {
+    console.log(`git filter-repo not available. Using git filter-branch to remove ${filePath}...`);
+
+    const currentBranch = (await $`git branch --show-current`.text()).trim();
+    const branchFormat = '%(refname:short)';
+    const otherBranches = (await $`git branch --format=${branchFormat}`.text())
+      .trim()
+      .split('\n')
+      .filter((b) => b !== currentBranch);
+
+    if (otherBranches.length > 0) {
+      console.warn(
+        `${ICONS.warning} Other branches exist (${otherBranches.join(', ')}). filter-branch will only rewrite the current branch.`,
+      );
+    }
+
+    const escapedPath = filePath.replace(/"/g, '\\"');
+    const filterCommand = `git rm --cached --ignore-unmatch --quiet "${escapedPath}"`;
+    await $`git filter-branch --force --index-filter ${filterCommand} HEAD`.quiet();
+
+    try {
+      await $`git update-ref -d refs/original/refs/heads/$(git branch --show-current)`.quiet();
+    } catch {
+      // refs/original may not exist; ignore
+    }
+  }
 }

@@ -4,8 +4,13 @@ import { mkdtempSync, rmSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { parseLineSpecs } from '../../src/parser.ts';
-import { checkGitVersion, getLineBlameInfo, groupReplacementsByCommit } from '../../src/git-utils.ts';
-import { performRebase } from '../../src/rebase.ts';
+import {
+  checkGitVersion,
+  getLineBlameInfo,
+  groupReplacementsByCommit,
+  getCommitsTouchingFile,
+} from '../../src/git-utils.ts';
+import { performRebase, performFileRemoval } from '../../src/rebase.ts';
 import type { CommitReplacements } from '../../src/types.ts';
 
 async function spawnCli(
@@ -449,6 +454,75 @@ describe('Git integration tests', () => {
     const blameOutput = await $`git blame config.txt`.text();
     expect(blameOutput).not.toContain('SECRET=top_secret');
   });
+
+  it('performFileRemoval removes file from single commit', async () => {
+    await writeFile('secret.txt', 'SECRET=old-value\nOTHER=keep\n');
+    await $`git add secret.txt`;
+    await $`git commit -m "Add secret"`;
+
+    await writeFile('other.txt', 'other-data\n');
+    await $`git add other.txt`;
+    await $`git commit -m "Add other file"`;
+
+    const commitsBefore = await getCommitsTouchingFile('secret.txt');
+    expect(commitsBefore).toHaveLength(1);
+
+    await performFileRemoval('secret.txt', false);
+
+    const commitsAfter = await getCommitsTouchingFile('secret.txt');
+    expect(commitsAfter).toHaveLength(0);
+
+    const log = await $`git log --oneline`.text();
+    expect(log).toContain('Add other file');
+  }, 30000);
+
+  it('performFileRemoval removes file modified in multiple commits', async () => {
+    const lines = Array.from({ length: 10 }, (_, i) => `line${i + 1}`);
+    await writeFile('multi.txt', lines.join('\n') + '\n');
+    await $`git add multi.txt`;
+    await $`git commit -m "Initial file"`;
+
+    lines[4] = 'SECRET=123';
+    await writeFile('multi.txt', lines.join('\n') + '\n');
+    await $`git add multi.txt`;
+    await $`git commit -m "Add secret to line 5"`;
+
+    lines[9] = 'modified-line10';
+    await writeFile('multi.txt', lines.join('\n') + '\n');
+    await $`git add multi.txt`;
+    await $`git commit -m "Modify line 10"`;
+
+    await writeFile('other.txt', 'other-data\n');
+    await $`git add other.txt`;
+    await $`git commit -m "Add other file"`;
+
+    const commitsBefore = await getCommitsTouchingFile('multi.txt');
+    expect(commitsBefore).toHaveLength(3);
+
+    await performFileRemoval('multi.txt', false);
+
+    const commitsAfter = await getCommitsTouchingFile('multi.txt');
+    expect(commitsAfter).toHaveLength(0);
+
+    const otherContent = await $`git show HEAD:other.txt`.text();
+    expect(otherContent).toBe('other-data\n');
+  }, 30000);
+
+  it('performFileRemoval does not remove pre-existing branches', async () => {
+    await writeFile('data.txt', 'sensitive-data\n');
+    await $`git add data.txt`;
+    await $`git commit -m "Add data"`;
+
+    await $`git branch backup-before-removal`;
+
+    await performFileRemoval('data.txt', false);
+
+    const branchList = await $`git branch`.text();
+    expect(branchList).toContain('backup-before-removal');
+
+    const backupContent = await $`git show backup-before-removal:data.txt`.text();
+    expect(backupContent).toBe('sensitive-data\n');
+  }, 30000);
 });
 
 describe('Working directory flag', () => {
@@ -495,5 +569,65 @@ describe('Working directory flag', () => {
 
     expect(exitCode).toBe(1);
     expect(stderr).toContain('Git repository has uncommitted changes');
+  });
+});
+
+describe('--rm CLI flag', () => {
+  let tempDir: string;
+  let projectRoot: string;
+
+  beforeEach(async () => {
+    projectRoot = process.cwd();
+    tempDir = mkdtempSync(join(tmpdir(), 'git-private-data-remover-'));
+    process.chdir(tempDir);
+
+    await $`git init`;
+    await $`git config user.email "test@example.com"`;
+    await $`git config user.name "Test User"`;
+  });
+
+  afterEach(() => {
+    try {
+      process.chdir(projectRoot);
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it('errors when --rm and --lines are both provided', async () => {
+    await writeFile('secret.txt', 'SECRET=old\n');
+    await $`git add secret.txt`;
+    await $`git commit -m "Add secret"`;
+
+    const { exitCode, stderr } = await spawnCli(['-w', tempDir, '-f', 'secret.txt', '-r', '-l', '1'], projectRoot);
+
+    expect(exitCode).toBe(1);
+    expect(stderr).toContain('mutually exclusive');
+  });
+
+  it('dry-run shows commits without modifying history', async () => {
+    await writeFile('secret.txt', 'SECRET=old\n');
+    await $`git add secret.txt`;
+    await $`git commit -m "Add secret"`;
+
+    await writeFile('other.txt', 'other\n');
+    await $`git add other.txt`;
+    await $`git commit -m "Add other"`;
+
+    const { exitCode, stdout } = await spawnCli(['-w', tempDir, '-f', 'secret.txt', '-r', '-d'], projectRoot);
+
+    expect(exitCode).toBe(0);
+    expect(stdout).toContain('DRY RUN');
+    expect(stdout).toContain('Add secret');
+
+    const commits = await getCommitsTouchingFile('secret.txt');
+    expect(commits).toHaveLength(1);
+  });
+
+  it('requires --file when using --rm', async () => {
+    const { exitCode, stderr } = await spawnCli(['-w', tempDir, '-r'], projectRoot);
+
+    expect(exitCode).toBe(1);
+    expect(stderr).toContain('--file');
   });
 });

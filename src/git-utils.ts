@@ -193,3 +193,12 @@ export async function purgeReflogAndGc(): Promise<void> {
   await $`git reflog expire --expire=now --all`;
   await $`git gc --prune=now --aggressive`;
 }
+
+export async function getCommitsTouchingFile(filePath: string): Promise<string[]> {
+  try {
+    const output = await $`git log --follow --format=%H -- ${filePath}`.text();
+    return output.trim().split('\n').filter(Boolean);
+  } catch {
+    return [];
+  }
+}

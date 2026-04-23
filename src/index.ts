@@ -16,9 +16,18 @@ import {
   purgeReflogAndGc,
   getCommitInfo,
   sortCommitsTopologically,
+  getCommitsTouchingFile,
 } from './git-utils.ts';
-import { promptForReplacements, confirmAction, outro, cancel, ICONS, confirmCommit } from './prompts.ts';
-import { performRebase } from './rebase.ts';
+import {
+  promptForReplacements,
+  confirmAction,
+  outro,
+  cancel,
+  ICONS,
+  confirmCommit,
+  warnMultiCommitRemoval,
+} from './prompts.ts';
+import { performRebase, performFileRemoval } from './rebase.ts';
 import type { LineInfo } from './types.ts';
 
 const MIN_GIT_VERSION = '2.0.0';
@@ -64,6 +73,10 @@ async function main(): Promise<void> {
         short: 'd',
         default: false,
       },
+      rm: {
+        type: 'boolean',
+        short: 'r',
+      },
       'working-directory': {
         type: 'string',
         short: 'w',
@@ -89,8 +102,23 @@ async function main(): Promise<void> {
     process.exit(0);
   }
 
-  if (!values['working-directory'] || !values.file || !values.lines || values.lines.trim() === '') {
-    console.error(`${ICONS.error} Error: --working-directory, --file and --lines are required`);
+  const isRmOperation = values.rm === true;
+  const lineSpecs = values.lines;
+
+  if (!values['working-directory'] || !values.file) {
+    console.error(`${ICONS.error} Error: --working-directory and --file are required`);
+    printUsage();
+    process.exit(1);
+  }
+
+  if (isRmOperation && lineSpecs) {
+    console.error(`${ICONS.error} Error: --rm and --lines are mutually exclusive. Use one or the other.`);
+    printUsage();
+    process.exit(1);
+  }
+
+  if (!isRmOperation && (!lineSpecs || lineSpecs.trim() === '')) {
+    console.error(`${ICONS.error} Error: --lines is required (unless using --rm)`);
     printUsage();
     process.exit(1);
   }
@@ -117,7 +145,6 @@ async function main(): Promise<void> {
   }
 
   const file = values.file;
-  const lineSpecs = values.lines;
   const dryRun = values['dry-run'];
 
   const fileExists = await Bun.file(file).exists();
@@ -134,13 +161,19 @@ async function main(): Promise<void> {
   }
 
   console.log(`Checking file: ${file}`);
-  console.log(`Line specs: ${lineSpecs}`);
 
   if (dryRun) {
     console.log('Running in DRY-RUN mode (no changes will be made)');
   }
 
-  const ranges = parseLineSpecs(lineSpecs);
+  if (isRmOperation) {
+    await handleFileRemoval(file, dryRun);
+    return;
+  }
+
+  console.log(`Line specs: ${lineSpecs}`);
+
+  const ranges = parseLineSpecs(lineSpecs!);
   const lineInfos: LineInfo[][] = [];
 
   for (const range of ranges) {
@@ -307,6 +340,108 @@ async function main(): Promise<void> {
   }
 }
 
+async function handleFileRemoval(file: string, dryRun: boolean): Promise<void> {
+  const commits = await getCommitsTouchingFile(file);
+
+  if (commits.length === 0) {
+    cancel('File was not found in git history');
+    process.exit(0);
+  }
+
+  console.log(`File found in ${commits.length} commit(s)`);
+
+  if (commits.length > 1) {
+    const confirmed = await warnMultiCommitRemoval(commits.length);
+    if (!confirmed) {
+      cancel('Operation cancelled');
+      process.exit(0);
+    }
+  }
+
+  if (dryRun) {
+    console.log(`\n[DRY RUN] Would remove ${file} from ${commits.length} commit(s):`);
+    for (const hash of commits) {
+      const { subject } = await getCommitInfo(hash);
+      console.log(`  ${hash.substring(0, 7)}: ${subject}`);
+    }
+    outro('Dry-run completed. No changes were made.');
+    process.exit(0);
+  }
+
+  const hasRemote = await hasRemoteCommits();
+  const currentBranch = await getCurrentBranch();
+
+  if (hasRemote) {
+    console.warn(`\n${ICONS.warning} WARNING: This repository has a remote upstream.`);
+    console.warn('Rewriting history will require force-pushing to the remote.');
+    console.warn('This can affect other collaborators.');
+    console.warn('Note: remote copies and existing clones still contain the private data after this operation.');
+  }
+
+  console.log(
+    `\n${ICONS.info} If anything goes wrong during the removal, you can always reset to the current state with:`,
+  );
+  console.log(`  git reset --hard ${currentBranch}`);
+
+  const backupBranch = await createBackupBranch(currentBranch);
+
+  console.log(`\nCreated backup branch: ${backupBranch}`);
+  console.log(`If anything goes wrong, recover with: git reset --hard ${backupBranch}`);
+
+  const proceed = await confirmAction(`Are you sure you want to permanently remove ${file} from all git history?`);
+
+  if (!proceed) {
+    cancel('Operation cancelled');
+    process.exit(0);
+  }
+
+  try {
+    await performFileRemoval(file, dryRun);
+
+    console.log('\nFile removal completed successfully.');
+
+    console.warn(`\n${ICONS.warning} The backup branch ${backupBranch} still contains the ORIGINAL private data.`);
+    const removeBackup = await confirmAction(`Remove backup branch ${backupBranch}?`, true);
+
+    if (removeBackup) {
+      await $`git branch -D ${backupBranch}`;
+      console.log(`Backup branch ${backupBranch} removed.`);
+    } else {
+      console.warn(`${ICONS.warning} Backup branch retained. The private data remains recoverable via this branch.`);
+    }
+
+    console.log('\nExpiring reflog and compressing git storage...');
+    await purgeReflogAndGc();
+    console.log('Git storage compressed.');
+
+    if (hasRemote) {
+      console.warn(`\n${ICONS.warning} Remember to force-push your changes:`);
+      console.warn(`  git push --force-with-lease origin ${currentBranch}`);
+      console.warn(`${ICONS.warning} Any existing clones, forks, or cached refs still contain the original data.`);
+    }
+
+    outro('Done! File has been removed from local git history.');
+  } catch (error) {
+    console.error(
+      `\n${ICONS.error} Error during file removal:`,
+      error instanceof Error ? error.message : String(error),
+    );
+    console.error('\nRestoring from backup branch...');
+
+    try {
+      if (await isRebaseInProgress()) {
+        await $`git rebase --abort`.quiet();
+      }
+    } catch {
+      // best-effort
+    }
+
+    await $`git reset --hard ${backupBranch}`;
+    console.error(`Restored to backup branch: ${backupBranch}`);
+    process.exit(1);
+  }
+}
+
 function printUsage(): void {
   console.log(`
 Git Private Data Remover
@@ -319,8 +454,9 @@ Usage:
 Options:
   -w, --working-directory <path>  Directory of the git repository (required)
   -f, --file <path>     File containing private data (required)
-  -l, --lines <spec>    Line number(s) to remove (required, comma-separated)
+  -l, --lines <spec>    Line number(s) to remove (required unless --rm, comma-separated)
                         Format: "10" for single line, "10-20" for range, "10,20-30" for multiple
+  -r, --rm              Completely remove the file from all git history
   -d, --dry-run         Show what would be changed without modifying history
   -h, --help            Show this help message
 

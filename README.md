@@ -47,7 +47,8 @@ bun run src/index.ts -w <working-directory> -f <file> -l <line-spec> [options]
 |------|-------------|
 | `-w, --working-directory <path>` | Directory of the git repository to operate on (required) |
 | `-f, --file <path>` | File containing private data (required) |
-| `-l, --lines <spec>` | Line number(s) to remove.  Format: `10` for single line, `10-20` for range (required) |
+| `-l, --lines <spec>` | Line number(s) to remove.  Format: `10` for single line, `10-20` for range (required unless --rm) |
+| `-r, --rm` | Completely remove the file from all git history |
 | `-d, --dry-run` | Show what would be changed without modifying history |
 | `-h, --help` | Show help message |
 
@@ -71,6 +72,18 @@ Dry-run to preview changes:
 bun run src/index.ts -w ../some-repo -f secrets.txt -l 3-7 --dry-run
 ```
 
+Remove an entire file from history:
+
+```bash
+bun run src/index.ts -w ../some-repo -f ./my-private-key.pem --rm
+```
+
+Dry-run file removal:
+
+```bash
+bun run src/index.ts -w ../some-repo -f ./my-private-key.pem --rm --dry-run
+```
+
 ## How It Works
 
 1. **Parse line specs**: Validates and parses line numbers/ranges
@@ -81,6 +94,12 @@ bun run src/index.ts -w ../some-repo -f secrets.txt -l 3-7 --dry-run
 6. **Interactive rebase**: Uses `git rebase -i` with `GIT_SEQUENCE_EDITOR` to stop at each target commit
 7. **Commit amendment**: Applies replacements and amends the commit
 8. **Storage cleanup**: Runs `git gc --aggressive --prune=now` to remove old objects
+
+## Limitations
+
+- The `--rm` flag requires either `git filter-repo` (recommended) or `git filter-branch` to rewrite history.
+- `git filter-branch` is significantly slower than `git filter-repo` and may struggle with large repositories.
+- Always create a remote backup (e.g., push to a temporary remote branch) before rewriting history.
 
 ## Development
 

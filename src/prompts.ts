@@ -59,6 +59,18 @@ export async function promptForReplacements(allLines: LineInfo[]): Promise<Map<n
   return replacements;
 }
 
+export async function warnMultiCommitRemoval(commitCount: number): Promise<boolean> {
+  console.log();
+  console.log(
+    chalk.yellow(`${ICONS.warning} This file was modified in ${commitCount} commits. Removing it may cause conflicts.`),
+  );
+  const result = await confirm({
+    message: 'Continue with file removal?',
+    initialValue: false,
+  });
+  return result === true;
+}
+
 async function promptSingleLine(lineNumber: number): Promise<string | null> {
   while (true) {
     const answer = await text({
