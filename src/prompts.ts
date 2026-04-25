@@ -1,15 +1,16 @@
 import { confirm, isCancel, outro, cancel, text } from '@clack/prompts';
 import chalk from 'chalk';
+import logSymbols from 'log-symbols';
 import { getTerminalInfo } from './terminal.ts';
 import type { LineInfo } from './types.ts';
 
 const { supportsUnicode: unicodeEnabled } = getTerminalInfo();
 
 const ICONS = {
-  success: unicodeEnabled ? '✓' : '[OK]',
-  error: unicodeEnabled ? '✗' : '[ERR]',
-  warning: unicodeEnabled ? '⚠' : '[WARN]',
-  info: unicodeEnabled ? 'ℹ' : '[INFO]',
+  success: logSymbols.success,
+  error: logSymbols.error,
+  warning: logSymbols.warning,
+  info: logSymbols.info,
 };
 
 export { outro, cancel, ICONS };
@@ -24,14 +25,16 @@ export async function confirmCommit(commitHash: string, commitSubject: string, l
   console.log(chalk.bold.blue(`${ICONS.info} Commit ${commitHash.slice(0, 8)}: ${commitSubject}`));
   console.log();
 
+  const ellipsis = unicodeEnabled ? '…' : '...';
   for (const line of lines) {
-    console.log(chalk.gray(`  Line ${line.originalLineNumber}: ${line.content.slice(0, 80)}`));
+    const display = line.content.length > 80 ? `${line.content.slice(0, 80)}${ellipsis}` : line.content;
+    console.log(chalk.gray(`  Line ${line.originalLineNumber}: ${display}`));
   }
 
   console.log();
 
   const modifyCommit = await confirm({
-    message: 'These lines to replace?',
+    message: 'Replace these lines?',
     initialValue: true,
   });
 

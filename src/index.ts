@@ -262,7 +262,7 @@ async function main(): Promise<void> {
     console.warn(`\n${ICONS.warning} WARNING: This repository has a remote upstream.`);
     console.warn('Rewriting history will require force-pushing to the remote.');
     console.warn('This can affect other collaborators.');
-    console.warn('Note: remote copies and existing clones still contain the private data after this operation.');
+    console.warn('Note: remote copies and existing clones will still contain the private data after this operation.');
   }
 
   console.log(
@@ -375,7 +375,7 @@ async function handleFileRemoval(file: string, dryRun: boolean): Promise<void> {
     console.warn(`\n${ICONS.warning} WARNING: This repository has a remote upstream.`);
     console.warn('Rewriting history will require force-pushing to the remote.');
     console.warn('This can affect other collaborators.');
-    console.warn('Note: remote copies and existing clones still contain the private data after this operation.');
+    console.warn('Note: remote copies and existing clones will still contain the private data after this operation.');
   }
 
   console.log(
