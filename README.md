@@ -28,11 +28,31 @@ A TypeScript/Bun CLI tool to remove accidentally committed private data from git
 
 - [Bun](https://bun.sh) >= 1.0
 - Git >= 2.0
+- (Optional, recommended for `--rm`) [`git filter-repo`](https://github.com/newren/git-filter-repo) — see [Removing a file from history](#removing-a-file-from-history)
 
 ## Installation
 
 ```bash
 bun install
+```
+
+### Installing `git filter-repo` (recommended for `--rm`)
+
+`git filter-repo` is the [tool recommended by the Git project](https://git-scm.com/docs/git-filter-branch#_warning) for rewriting history; it is faster and safer than the legacy `git filter-branch`. When the `--rm` flag is used, this tool prefers `git filter-repo` and falls back to `git filter-branch` only if it is not installed.
+
+| Platform | Command |
+|----------|---------|
+| macOS (Homebrew) | `brew install git-filter-repo` |
+| Debian / Ubuntu | `sudo apt install git-filter-repo` |
+| Fedora | `sudo dnf install git-filter-repo` |
+| Arch Linux | `sudo pacman -S git-filter-repo` |
+| Windows (Scoop) | `scoop install git-filter-repo` |
+| Any platform with Python | `pip install git-filter-repo` |
+
+Verify the install:
+
+```bash
+git filter-repo --version
 ```
 
 ## Usage
@@ -95,11 +115,20 @@ bun run src/index.ts -w ../some-repo -f ./my-private-key.pem --rm --dry-run
 7. **Commit amendment**: Applies replacements and amends the commit
 8. **Storage cleanup**: Runs `git gc --aggressive --prune=now` to remove old objects
 
+## Removing a file from history
+
+The `--rm` flag completely removes a file from every commit in history. Two underlying tools can do this:
+
+- **`git filter-repo` (preferred)** — fast, actively maintained, and the tool the Git project itself recommends for history rewrites. Used automatically when available. See [Installing `git filter-repo`](#installing-git-filter-repo-recommended-for---rm) above.
+- **`git filter-branch` (fallback)** — bundled with Git but deprecated, significantly slower, and unsafe on large repositories. Used only when `git filter-repo` is not installed, and only rewrites the current branch.
+
+If you plan to use `--rm`, install `git filter-repo` first.
+
 ## Limitations
 
-- The `--rm` flag requires either `git filter-repo` (recommended) or `git filter-branch` to rewrite history.
-- `git filter-branch` is significantly slower than `git filter-repo` and may struggle with large repositories.
 - Always create a remote backup (e.g., push to a temporary remote branch) before rewriting history.
+- The `--rm` fallback (`git filter-branch`) only rewrites the current branch; install `git filter-repo` to rewrite every ref.
+- Merge commits are not supported in the rebase range when removing individual lines.
 
 ## Development
 
