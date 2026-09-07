@@ -1,5 +1,7 @@
 import { $ } from 'bun';
-import type { LineInfo, LineRange, Replacement, CommitReplacements } from './types.ts';
+import { realpathSync } from 'node:fs';
+import { isAbsolute, relative, resolve, sep } from 'node:path';
+import type { CommitReplacements, ContentHit, LineInfo, LineRange, RepoFile, Replacement } from './types.ts';
 
 export async function checkGitVersion(minVersion: string): Promise<void> {
   const versionOutput = await $`git --version`.text();
@@ -31,10 +33,26 @@ function compareVersions(a: string, b: string): number {
   return 0;
 }
 
+export async function resolveRepoFile(file: string): Promise<RepoFile> {
+  const toplevel = (await $`git rev-parse --show-toplevel`.quiet().text()).trim();
+  const absolute = resolve(realpathSync(process.cwd()), file);
+  const rel = relative(toplevel, absolute);
+
+  if (rel === '' || isAbsolute(rel) || rel.split(sep)[0] === '..') {
+    throw new Error(`File is outside the repository (${toplevel}): ${file}`);
+  }
+
+  const relativePath = rel.split(sep).join('/');
+  const tracked = await $`git ls-files --error-unmatch -- ${relativePath}`.cwd(toplevel).nothrow().quiet();
+
+  return { toplevel, relativePath, tracked: tracked.exitCode === 0 };
+}
+
 export async function getLineBlameInfo(file: string, lineRange: LineRange): Promise<LineInfo[]> {
   const output = await $`git blame -L ${lineRange.start},${lineRange.end} -p -- ${file}`.text();
   const lines = output.trim().split('\n');
   const result: LineInfo[] = [];
+  const filenames = new Map<string, string>();
   let currentCommit = '';
   let currentOriginalLine = 0;
   let currentFinalLine = 0;
@@ -45,6 +63,8 @@ export async function getLineBlameInfo(file: string, lineRange: LineRange): Prom
       currentCommit = parts[0];
       currentOriginalLine = Number.parseInt(parts[1], 10);
       currentFinalLine = Number.parseInt(parts[2], 10);
+    } else if (line.startsWith('filename ')) {
+      filenames.set(currentCommit, line.slice('filename '.length));
     } else if (line.startsWith('\t')) {
       const content = line.substring(1);
       result.push({
@@ -52,6 +72,7 @@ export async function getLineBlameInfo(file: string, lineRange: LineRange): Prom
         content,
         commitHash: currentCommit,
         originalLineNumber: currentOriginalLine,
+        originalFile: filenames.get(currentCommit) ?? file,
       });
       currentFinalLine++;
       currentOriginalLine++;
@@ -61,15 +82,25 @@ export async function getLineBlameInfo(file: string, lineRange: LineRange): Prom
   return result;
 }
 
-export async function getFileAtCommit(file: string, commitHash: string): Promise<string[]> {
-  const output = await $`git show ${commitHash}:${file}`.text();
-  return output.split('\n');
+export function dedupeLineInfos(lines: LineInfo[]): LineInfo[] {
+  const seen = new Set<number>();
+  return lines.filter((line) => {
+    if (seen.has(line.lineNumber)) {
+      return false;
+    }
+    seen.add(line.lineNumber);
+    return true;
+  });
 }
 
 export async function getCommitInfo(commitHash: string): Promise<{ hash: string; subject: string }> {
   const output = await $`git log -1 --format=%H%n%s ${commitHash}`.text();
   const [hash, subject] = output.trim().split('\n');
-  return { hash: hash.trim(), subject: subject.trim() };
+  return { hash: hash.trim(), subject: (subject ?? '').trim() };
+}
+
+export async function getHeadCommit(): Promise<string> {
+  return (await $`git rev-parse HEAD`.quiet().text()).trim();
 }
 
 export async function createBackupBranch(originalBranch: string): Promise<string> {
@@ -84,12 +115,8 @@ export async function getCurrentBranch(): Promise<string> {
 }
 
 export async function hasMergeCommitsInRange(earliestCommit: string): Promise<boolean> {
-  let output: string;
-  try {
-    output = await $`git rev-list --merges ${earliestCommit}^..HEAD`.text();
-  } catch {
-    output = await $`git rev-list --merges HEAD`.text();
-  }
+  const ranged = await $`git rev-list --merges ${earliestCommit}^..HEAD`.nothrow().quiet();
+  const output = ranged.exitCode === 0 ? ranged.text() : await $`git rev-list --merges HEAD`.quiet().text();
   return output.trim() !== '';
 }
 
@@ -125,7 +152,7 @@ export async function groupReplacementsByCommit(
   lineInfos: LineInfo[],
   replacements: Map<number, string>,
 ): Promise<CommitReplacements[]> {
-  const groups = new Map<string, Replacement[]>();
+  const groups = new Map<string, { file: string; lines: Replacement[] }>();
 
   for (const info of lineInfos) {
     const replacement = replacements.get(info.lineNumber);
@@ -134,9 +161,9 @@ export async function groupReplacementsByCommit(
       continue;
     }
 
-    const existing = groups.get(info.commitHash) || [];
+    const existing = groups.get(info.commitHash) ?? { file: info.originalFile, lines: [] };
 
-    existing.push({
+    existing.lines.push({
       lineNumber: info.originalLineNumber,
       originalContent: info.content,
       replacementContent: replacement,
@@ -145,9 +172,10 @@ export async function groupReplacementsByCommit(
     groups.set(info.commitHash, existing);
   }
 
-  const entries = Array.from(groups.entries()).map(([commitHash, lines]) => ({
+  const entries = Array.from(groups.entries()).map(([commitHash, group]) => ({
     commitHash,
-    lines,
+    file: group.file,
+    lines: group.lines,
   }));
 
   if (entries.length <= 1) {
@@ -166,7 +194,7 @@ export async function groupReplacementsByCommit(
 
 export async function hasRemoteCommits(): Promise<boolean> {
   try {
-    await $`git rev-parse --abbrev-ref --symbolic-full-name @{u}`;
+    await $`git rev-parse --abbrev-ref --symbolic-full-name @{u}`.quiet();
     return true;
   } catch {
     return false;
@@ -201,4 +229,43 @@ export async function getCommitsTouchingFile(filePath: string): Promise<string[]
   } catch {
     return [];
   }
+}
+
+export async function getCommitsTouchingFileInAllRefs(filePath: string): Promise<string[]> {
+  const output = await $`git log --all --format=%H -- ${filePath}`.nothrow().quiet();
+  return output.exitCode === 0 ? output.text().trim().split('\n').filter(Boolean) : [];
+}
+
+export async function findCommitsContainingLines(files: string[], contents: string[]): Promise<ContentHit[]> {
+  const wanted = Array.from(new Set(contents.filter((content) => content.trim() !== '')));
+  const hits: ContentHit[] = [];
+
+  if (wanted.length === 0) {
+    return hits;
+  }
+
+  for (const file of Array.from(new Set(files))) {
+    for (const hash of await getCommitsTouchingFileInAllRefs(file)) {
+      const shown = await $`git show ${hash}:${file}`.nothrow().quiet();
+
+      if (shown.exitCode !== 0) {
+        continue;
+      }
+
+      const fileLines = new Set(shown.text().split('\n'));
+      const found = wanted.filter((content) => fileLines.has(content));
+
+      if (found.length > 0) {
+        hits.push({ hash, file, lines: found });
+      }
+    }
+  }
+
+  return hits;
+}
+
+export async function getRefsContaining(commitHash: string): Promise<string[]> {
+  const format = '%(refname)';
+  const output = await $`git for-each-ref --contains ${commitHash} --format=${format}`.nothrow().quiet();
+  return output.exitCode === 0 ? output.text().trim().split('\n').filter(Boolean) : [];
 }

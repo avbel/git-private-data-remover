@@ -8,7 +8,8 @@ A TypeScript/Bun CLI tool to remove accidentally committed private data from git
 - **Interactive prompts**: Asks for replacement text for each line
 - **Dry-run mode**: Preview changes without modifying history
 - **Automatic backup**: Creates a backup branch before rewriting
-- **Storage cleanup**: Compresses git storage to remove traces of old data
+- **Storage cleanup**: Expires the reflog and compresses git storage to drop the old objects
+- **Verification**: After rewriting, scans every local ref for the original data and tells you exactly which commits and refs still hold it
 
 ## Safety Features
 
@@ -27,7 +28,7 @@ A TypeScript/Bun CLI tool to remove accidentally committed private data from git
 ## Prerequisites
 
 - [Bun](https://bun.sh) >= 1.0
-- Git >= 2.0
+- Git >= 2.22
 - (Optional, recommended for `--rm`) [`git filter-repo`](https://github.com/newren/git-filter-repo) — see [Removing a file from history](#removing-a-file-from-history)
 
 ## Installation
@@ -65,10 +66,10 @@ bun run src/index.ts -w <working-directory> -f <file> -l <line-spec> [options]
 
 | Flag | Description |
 |------|-------------|
-| `-w, --working-directory <path>` | Directory of the git repository to operate on (required) |
-| `-f, --file <path>` | File containing private data (required) |
+| `-w, --working-directory <path>` | Directory of the git repository, or any directory inside it (required) |
+| `-f, --file <path>` | File containing private data, relative to the working directory (required) |
 | `-l, --lines <spec>` | Line number(s) to remove.  Format: `10` for single line, `10-20` for range (required unless --rm) |
-| `-r, --rm` | Completely remove the file from all git history |
+| `-r, --rm` | Completely remove the file from the current branch's history |
 | `-d, --dry-run` | Show what would be changed without modifying history |
 | `-h, --help` | Show help message |
 
@@ -113,22 +114,26 @@ bun run src/index.ts -w ../some-repo -f ./my-private-key.pem --rm --dry-run
 5. **Backup creation**: Creates a backup branch before any modifications
 6. **Interactive rebase**: Uses `git rebase -i` with `GIT_SEQUENCE_EDITOR` to stop at each target commit
 7. **Commit amendment**: Applies replacements and amends the commit
-8. **Storage cleanup**: Runs `git gc --aggressive --prune=now` to remove old objects
+8. **Storage cleanup**: Expires the reflog and runs `git gc --aggressive --prune=now` to remove old objects
+9. **Verification**: Scans every local ref (`git log --all`) for the original lines and reports any commit that still contains them, together with the refs keeping that commit alive
 
 ## Removing a file from history
 
-The `--rm` flag completely removes a file from every commit in history. Two underlying tools can do this:
+The `--rm` flag removes a file from every commit on the current branch. Two underlying tools can do this:
 
-- **`git filter-repo` (preferred)** — fast, actively maintained, and the tool the Git project itself recommends for history rewrites. Used automatically when available. See [Installing `git filter-repo`](#installing-git-filter-repo-recommended-for---rm) above.
-- **`git filter-branch` (fallback)** — bundled with Git but deprecated, significantly slower, and unsafe on large repositories. Used only when `git filter-repo` is not installed, and only rewrites the current branch.
+- **`git filter-repo` (preferred)** — fast, actively maintained, and the tool the Git project itself recommends for history rewrites. Used automatically when available. See [Installing `git filter-repo`](#installing-git-filter-repo-recommended-for---rm) above. It is run with `--refs <current-branch>` so that the backup branch, other local branches and the `origin` remote are left untouched.
+- **`git filter-branch` (fallback)** — bundled with Git but deprecated, significantly slower, and unsafe on large repositories. Used only when `git filter-repo` is not installed.
 
-If you plan to use `--rm`, install `git filter-repo` first.
+If you plan to use `--rm`, install `git filter-repo` first. If the file also exists on other branches, the verification step will list them; re-run the tool on each of those branches or delete them.
 
 ## Limitations
 
 - Always create a remote backup (e.g., push to a temporary remote branch) before rewriting history.
-- The `--rm` fallback (`git filter-branch`) only rewrites the current branch; install `git filter-repo` to rewrite every ref.
+- Only the current branch is rewritten. Other local branches and remote-tracking refs (`origin/*`) keep the original commits, so the old objects stay in `.git` until you force-push, run `git fetch --prune`, and run `git gc --prune=now`. The verification step tells you when this is the case.
+- `git blame` only reports the **most recent** commit that touched a line. If a secret line was edited in several commits (for example the key was rotated in place), only the latest value is rewritten; earlier values remain in earlier commits. Targeting those earlier commits by hand causes a rebase conflict, which the tool detects and rolls back. Use `--rm` for that file instead, or rewrite the commits one at a time from oldest to newest.
 - Merge commits are not supported in the rebase range when removing individual lines.
+- Replacement text must be a single line, so a line can be blanked but not deleted.
+- HEAD must be on a branch (detached HEAD is refused).
 
 ## Development
 

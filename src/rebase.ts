@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { unlink } from 'node:fs/promises';
 import { ICONS } from './prompts.ts';
+import { describeError } from './shell.ts';
 import type { CommitReplacements } from './types.ts';
 
 export async function rewriteCommit(
@@ -10,37 +11,32 @@ export async function rewriteCommit(
   file: string,
   replacements: CommitReplacements['lines'],
 ): Promise<void> {
-  const committedContent = (await $`git show HEAD:${file}`.text()).split('\n');
-  const workingContent = (await Bun.file(file).text()).split('\n');
+  const content = (await $`git show HEAD:${file}`.quiet().text()).split('\n');
 
   for (const replacement of replacements) {
     const lineIndex = replacement.lineNumber - 1;
 
-    if (lineIndex < 0 || lineIndex >= committedContent.length) {
-      throw new Error(`Line ${replacement.lineNumber} does not exist in commit ${commitHash}`);
+    if (lineIndex < 0 || lineIndex >= content.length) {
+      throw new Error(`Line ${replacement.lineNumber} does not exist in ${file} at commit ${commitHash}`);
     }
 
-    if (committedContent[lineIndex] !== replacement.originalContent) {
+    if (content[lineIndex] !== replacement.originalContent) {
       throw new Error(
-        `Content mismatch at line ${replacement.lineNumber} in commit ${commitHash}. Expected: "${replacement.originalContent}", got: "${committedContent[lineIndex]}"`,
+        `Content mismatch at line ${replacement.lineNumber} of ${file} in commit ${commitHash}: the line does not match what git blame reported`,
       );
     }
 
-    workingContent[lineIndex] = replacement.replacementContent;
+    content[lineIndex] = replacement.replacementContent;
   }
 
-  await Bun.write(file, workingContent.join('\n'));
-  await $`git add ${file}`;
-  await $`git commit --amend --no-edit --no-verify`;
+  await Bun.write(file, content.join('\n'));
+  await $`git add -- ${file}`;
+  await $`git commit --amend --no-edit --no-verify`.quiet();
 }
 
 async function isRootCommit(commitHash: string): Promise<boolean> {
-  try {
-    await $`git rev-parse ${commitHash}^`;
-    return false;
-  } catch {
-    return true;
-  }
+  const result = await $`git rev-parse --verify ${commitHash}^`.nothrow().quiet();
+  return result.exitCode !== 0;
 }
 
 export async function performRebase(commits: CommitReplacements[], file: string, dryRun: boolean): Promise<void> {
@@ -66,6 +62,7 @@ export async function performRebase(commits: CommitReplacements[], file: string,
   const env = {
     ...process.env,
     GIT_SEQUENCE_EDITOR: `cp -f "${todoFile}"`,
+    GIT_EDITOR: 'true',
   };
 
   try {
@@ -76,16 +73,12 @@ export async function performRebase(commits: CommitReplacements[], file: string,
     }
 
     for (const commit of commits) {
-      await rewriteCommit(commit.commitHash, file, commit.lines);
+      await rewriteCommit(commit.commitHash, commit.file ?? file, commit.lines);
       await $`git rebase --continue`.env(env);
     }
   } catch (error) {
-    try {
-      await $`git rebase --abort`.env(env).quiet();
-    } catch {
-      // rebase may not be in progress
-    }
-    throw new Error(`Rebase failed: ${error instanceof Error ? error.message : String(error)}`);
+    await $`git rebase --abort`.env(env).nothrow().quiet();
+    throw new Error(`Rebase failed: ${describeError(error)}`);
   } finally {
     await unlink(todoFile).catch(() => {});
   }
@@ -120,50 +113,48 @@ function modifyTodoForEdits(todo: string, commits: CommitReplacements[]): string
     .join('\n');
 }
 
-async function isFilterRepoAvailable(): Promise<boolean> {
-  try {
-    const result = await $`git filter-repo --help`.nothrow().quiet();
-    return result.exitCode === 0;
-  } catch {
-    return false;
-  }
+export async function isFilterRepoAvailable(): Promise<boolean> {
+  const result = await $`git filter-repo --version`.nothrow().quiet();
+  return result.exitCode === 0;
 }
 
-export async function performFileRemoval(filePath: string, dryRun: boolean): Promise<void> {
-  if (dryRun) {
-    console.log(`\n[DRY RUN] Would remove ${filePath} from all history`);
+export async function performFileRemoval(filePath: string, currentBranch: string): Promise<void> {
+  const branchRef = `refs/heads/${currentBranch}`;
+
+  if (await isFilterRepoAvailable()) {
+    console.log(`Using git filter-repo to remove ${filePath} from ${currentBranch}...`);
+    const result = await $`git filter-repo --force --refs ${branchRef} --path ${filePath} --invert-paths`
+      .nothrow()
+      .quiet();
+
+    if (result.exitCode !== 0) {
+      throw new Error(`git filter-repo failed: ${result.stderr.toString().trim()}`);
+    }
+
     return;
   }
 
-  const filterRepoAvailable = await isFilterRepoAvailable();
+  console.log(`git filter-repo not available. Using git filter-branch to remove ${filePath}...`);
 
-  if (filterRepoAvailable) {
-    console.log(`Using git filter-repo to remove ${filePath}...`);
-    await $`git filter-repo --force --path ${filePath} --invert-paths`.quiet();
-  } else {
-    console.log(`git filter-repo not available. Using git filter-branch to remove ${filePath}...`);
+  const branchFormat = '%(refname:short)';
+  const otherBranches = (await $`git branch --format=${branchFormat}`.text())
+    .trim()
+    .split('\n')
+    .filter((b) => b !== '' && b !== currentBranch);
 
-    const currentBranch = (await $`git branch --show-current`.text()).trim();
-    const branchFormat = '%(refname:short)';
-    const otherBranches = (await $`git branch --format=${branchFormat}`.text())
-      .trim()
-      .split('\n')
-      .filter((b) => b !== currentBranch);
-
-    if (otherBranches.length > 0) {
-      console.warn(
-        `${ICONS.warning} Other branches exist (${otherBranches.join(', ')}). filter-branch will only rewrite the current branch.`,
-      );
-    }
-
-    const escapedPath = filePath.replace(/"/g, '\\"');
-    const filterCommand = `git rm --cached --ignore-unmatch --quiet "${escapedPath}"`;
-    await $`git filter-branch --force --index-filter ${filterCommand} HEAD`.quiet();
-
-    try {
-      await $`git update-ref -d refs/original/refs/heads/$(git branch --show-current)`.quiet();
-    } catch {
-      // refs/original may not exist; ignore
-    }
+  if (otherBranches.length > 0) {
+    console.warn(
+      `${ICONS.warning} Other branches exist (${otherBranches.join(', ')}). filter-branch will only rewrite the current branch.`,
+    );
   }
+
+  const escapedPath = filePath.replace(/[\\"$`]/g, '\\$&');
+  const filterCommand = `git rm --cached --ignore-unmatch --quiet -- "${escapedPath}"`;
+  const result = await $`git filter-branch --force --index-filter ${filterCommand} HEAD`.nothrow().quiet();
+
+  if (result.exitCode !== 0) {
+    throw new Error(`git filter-branch failed: ${result.stderr.toString().trim()}`);
+  }
+
+  await $`git update-ref -d ${`refs/original/${branchRef}`}`.nothrow().quiet();
 }

@@ -1,6 +1,6 @@
 {
   "name": "git-private-data-remover",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "CLI tool to remove accidentally committed private data from git history",
   "module": "src/index.ts",
   "type": "module",

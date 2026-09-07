@@ -20,10 +20,3 @@ export function supportsUnicode(): boolean {
 
   return process.stdout.isTTY || false;
 }
-
-export function getTerminalInfo(): { supportsUnicode: boolean; isInteractive: boolean } {
-  return {
-    supportsUnicode: supportsUnicode(),
-    isInteractive: process.stdin.isTTY || false,
-  };
-}

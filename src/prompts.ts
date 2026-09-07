@@ -1,10 +1,10 @@
 import { confirm, isCancel, outro, cancel, text } from '@clack/prompts';
 import chalk from 'chalk';
 import logSymbols from 'log-symbols';
-import { getTerminalInfo } from './terminal.ts';
+import { supportsUnicode } from './terminal.ts';
 import type { LineInfo } from './types.ts';
 
-const { supportsUnicode: unicodeEnabled } = getTerminalInfo();
+const unicodeEnabled = supportsUnicode();
 
 const ICONS = {
   success: logSymbols.success,
@@ -28,7 +28,7 @@ export async function confirmCommit(commitHash: string, commitSubject: string, l
   const ellipsis = unicodeEnabled ? '…' : '...';
   for (const line of lines) {
     const display = line.content.length > 80 ? `${line.content.slice(0, 80)}${ellipsis}` : line.content;
-    console.log(chalk.gray(`  Line ${line.originalLineNumber}: ${display}`));
+    console.log(chalk.gray(`  Line ${line.originalLineNumber} (now line ${line.lineNumber}): ${display}`));
   }
 
   console.log();
@@ -48,7 +48,7 @@ export async function promptForReplacements(allLines: LineInfo[]): Promise<Map<n
     console.log();
     console.log(chalk.bold.blue(`${ICONS.info} Line ${line.lineNumber}:`));
     console.log(chalk.gray(`  Current: ${line.content}`));
-    console.log(chalk.gray(`  Commit: ${line.commitHash.slice(0, 8)}`));
+    console.log(chalk.gray(`  Commit: ${line.commitHash.slice(0, 8)} (line ${line.originalLineNumber} there)`));
 
     const replacement = await promptSingleLine(line.lineNumber);
 

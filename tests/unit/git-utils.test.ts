@@ -1,9 +1,10 @@
 import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
 import { $ } from 'bun';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { getCommitsTouchingFile } from '../../src/git-utils.ts';
+import { dedupeLineInfos, getCommitsTouchingFile, resolveRepoFile } from '../../src/git-utils.ts';
+import type { LineInfo } from '../../src/types.ts';
 
 async function writeFile(path: string, content: string): Promise<void> {
   await Bun.write(path, content);
@@ -83,5 +84,74 @@ describe('getCommitsTouchingFile', () => {
 
     const commits = await getCommitsTouchingFile('new-name.txt');
     expect(commits).toHaveLength(2);
+  });
+});
+
+describe('resolveRepoFile', () => {
+  let tempDir: string;
+  let originalCwd: string;
+
+  beforeEach(async () => {
+    originalCwd = process.cwd();
+    tempDir = realpathSync(mkdtempSync(join(tmpdir(), 'git-private-data-remover-')));
+    process.chdir(tempDir);
+
+    await $`git init`;
+    await $`git config user.email "test@example.com"`;
+    await $`git config user.name "Test User"`;
+
+    mkdirSync('sub');
+    await writeFile('sub/tracked.txt', 'content\n');
+    await $`git add sub/tracked.txt`;
+    await $`git commit -m "Add nested file"`;
+  });
+
+  afterEach(() => {
+    try {
+      process.chdir(originalCwd);
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it('returns the repository root and a root-relative path from the root', async () => {
+    const result = await resolveRepoFile('sub/tracked.txt');
+    expect(result).toEqual({ toplevel: tempDir, relativePath: 'sub/tracked.txt', tracked: true });
+  });
+
+  it('resolves paths relative to a subdirectory and normalizes ./ prefixes', async () => {
+    process.chdir(join(tempDir, 'sub'));
+    const result = await resolveRepoFile('./tracked.txt');
+    expect(result).toEqual({ toplevel: tempDir, relativePath: 'sub/tracked.txt', tracked: true });
+  });
+
+  it('reports untracked files as not tracked', async () => {
+    await writeFile('sub/untracked.txt', 'content\n');
+    const result = await resolveRepoFile('sub/untracked.txt');
+    expect(result.tracked).toBe(false);
+    expect(result.relativePath).toBe('sub/untracked.txt');
+  });
+
+  it('rejects files outside the repository', async () => {
+    await expect(resolveRepoFile('../outside.txt')).rejects.toThrow('outside the repository');
+  });
+});
+
+describe('dedupeLineInfos', () => {
+  const makeLine = (lineNumber: number, commitHash = 'a'.repeat(40)): LineInfo => ({
+    lineNumber,
+    content: `line${lineNumber}`,
+    commitHash,
+    originalLineNumber: lineNumber,
+    originalFile: 'file.txt',
+  });
+
+  it('keeps the first occurrence of each line number', () => {
+    const result = dedupeLineInfos([makeLine(5), makeLine(3), makeLine(5), makeLine(4), makeLine(3)]);
+    expect(result.map((line) => line.lineNumber)).toEqual([5, 3, 4]);
+  });
+
+  it('returns an empty array for empty input', () => {
+    expect(dedupeLineInfos([])).toEqual([]);
   });
 });

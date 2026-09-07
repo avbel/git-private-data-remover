@@ -6,9 +6,13 @@ import { join } from 'node:path';
 import { parseLineSpecs } from '../../src/parser.ts';
 import {
   checkGitVersion,
-  getLineBlameInfo,
-  groupReplacementsByCommit,
+  findCommitsContainingLines,
   getCommitsTouchingFile,
+  getCurrentBranch,
+  getLineBlameInfo,
+  getRefsContaining,
+  groupReplacementsByCommit,
+  purgeReflogAndGc,
 } from '../../src/git-utils.ts';
 import { performRebase, performFileRemoval } from '../../src/rebase.ts';
 import type { CommitReplacements } from '../../src/types.ts';
@@ -324,7 +328,7 @@ describe('Git integration tests', () => {
     }
   });
 
-  it('handles private data that was modified and removed in later commits (empty replacement)', async () => {
+  it('rolls back cleanly when the secret line was modified again in a later commit (rebase conflict)', async () => {
     const file = 'config.txt';
     const filePath = join(tempDir, file);
 
@@ -412,11 +416,6 @@ describe('Git integration tests', () => {
   });
 
   it('supports multiline replacement content', async () => {
-    process.chdir(tempDir);
-    await $`git init`;
-    await $`git config user.email "test@example.com"`;
-    await $`git config user.name "Test User"`;
-
     await writeFile('config.txt', 'line1\nline2\nline3\nline4\nline5\n');
     await $`git add config.txt`;
     await $`git commit -m "Initial commit"`;
@@ -467,7 +466,7 @@ describe('Git integration tests', () => {
     const commitsBefore = await getCommitsTouchingFile('secret.txt');
     expect(commitsBefore).toHaveLength(1);
 
-    await performFileRemoval('secret.txt', false);
+    await performFileRemoval('secret.txt', await getCurrentBranch());
 
     const commitsAfter = await getCommitsTouchingFile('secret.txt');
     expect(commitsAfter).toHaveLength(0);
@@ -499,7 +498,7 @@ describe('Git integration tests', () => {
     const commitsBefore = await getCommitsTouchingFile('multi.txt');
     expect(commitsBefore).toHaveLength(3);
 
-    await performFileRemoval('multi.txt', false);
+    await performFileRemoval('multi.txt', await getCurrentBranch());
 
     const commitsAfter = await getCommitsTouchingFile('multi.txt');
     expect(commitsAfter).toHaveLength(0);
@@ -515,13 +514,56 @@ describe('Git integration tests', () => {
 
     await $`git branch backup-before-removal`;
 
-    await performFileRemoval('data.txt', false);
+    await performFileRemoval('data.txt', await getCurrentBranch());
 
     const branchList = await $`git branch`.text();
     expect(branchList).toContain('backup-before-removal');
 
     const backupContent = await $`git show backup-before-removal:data.txt`.text();
     expect(backupContent).toBe('sensitive-data\n');
+  }, 30000);
+
+  it('rewrites a line whose originating commit stored the file under a different name', async () => {
+    await writeFile('old-name.txt', 'SECRET=abc\nkeep\n');
+    await $`git add old-name.txt`;
+    await $`git commit -m "Add secret under old name"`;
+
+    await $`git mv old-name.txt new-name.txt`;
+    await $`git commit -m "Rename file"`;
+
+    const info = await getLineBlameInfo('new-name.txt', { start: 1, end: 1 });
+    expect(info[0].originalFile).toBe('old-name.txt');
+
+    const commits = await groupReplacementsByCommit(info, new Map([[1, 'SECRET=REDACTED']]));
+    expect(commits[0].file).toBe('old-name.txt');
+
+    await performRebase(commits, 'new-name.txt', false);
+
+    const firstCommit = (await $`git rev-list --max-parents=0 HEAD`.text()).trim();
+    expect(await $`git show ${firstCommit}:old-name.txt`.text()).toBe('SECRET=REDACTED\nkeep\n');
+    expect(await $`git show HEAD:new-name.txt`.text()).toBe('SECRET=REDACTED\nkeep\n');
+  });
+
+  it('reports commits that still contain the original line via another ref after a rewrite', async () => {
+    await writeFile('secret.txt', 'SECRET=old-value\nkeep\n');
+    await $`git add secret.txt`;
+    await $`git commit -m "Add secret"`;
+    await $`git branch keep-old-history`;
+
+    const info = await getLineBlameInfo('secret.txt', { start: 1, end: 1 });
+    const commits = await groupReplacementsByCommit(info, new Map([[1, 'SECRET=REDACTED']]));
+    await performRebase(commits, 'secret.txt', false);
+
+    expect(await $`git show HEAD:secret.txt`.text()).toBe('SECRET=REDACTED\nkeep\n');
+
+    const hits = await findCommitsContainingLines(['secret.txt'], ['SECRET=old-value']);
+    expect(hits).toHaveLength(1);
+    expect(hits[0].lines).toEqual(['SECRET=old-value']);
+    expect(await getRefsContaining(hits[0].hash)).toEqual(['refs/heads/keep-old-history']);
+
+    await $`git branch -D keep-old-history`;
+    await purgeReflogAndGc();
+    expect(await findCommitsContainingLines(['secret.txt'], ['SECRET=old-value'])).toEqual([]);
   }, 30000);
 });
 
@@ -629,5 +671,28 @@ describe('--rm CLI flag', () => {
 
     expect(exitCode).toBe(1);
     expect(stderr).toContain('--file');
+  });
+
+  it('resolves the file relative to the repository root when -w points at a subdirectory', async () => {
+    await $`mkdir -p sub`;
+    await writeFile('sub/secret.txt', 'SECRET=old\n');
+    await $`git add sub/secret.txt`;
+    await $`git commit -m "Add nested secret"`;
+
+    const { exitCode, stdout } = await spawnCli(
+      ['-w', join(tempDir, 'sub'), '-f', './secret.txt', '-r', '-d'],
+      projectRoot,
+    );
+
+    expect(exitCode).toBe(0);
+    expect(stdout).toContain('Checking file: sub/secret.txt');
+    expect(stdout).toContain('File found in 1 commit(s)');
+  });
+
+  it('rejects a file outside the repository', async () => {
+    const { exitCode, stderr } = await spawnCli(['-w', tempDir, '-f', '../outside.txt', '-r'], projectRoot);
+
+    expect(exitCode).toBe(1);
+    expect(stderr).toContain('outside the repository');
   });
 });

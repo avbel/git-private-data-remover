@@ -8,6 +8,7 @@ export interface LineInfo {
   content: string;
   commitHash: string;
   originalLineNumber: number;
+  originalFile: string;
 }
 
 export interface Replacement {
@@ -18,5 +19,18 @@ export interface Replacement {
 
 export interface CommitReplacements {
   commitHash: string;
+  file?: string;
   lines: Replacement[];
+}
+
+export interface RepoFile {
+  toplevel: string;
+  relativePath: string;
+  tracked: boolean;
+}
+
+export interface ContentHit {
+  hash: string;
+  file: string;
+  lines: string[];
 }
