@@ -1,56 +1,58 @@
-import { describe, it, expect } from 'bun:test';
+import { describe, it } from 'node:test';
+import assert from 'node:assert/strict';
+import { throwsWith } from '../helpers.ts';
 import { parseLineSpec, parseLineSpecs } from '../../src/parser.ts';
 
 describe('parseLineSpec', () => {
   it('parses single line number', () => {
     const result = parseLineSpec('10');
-    expect(result).toEqual({ start: 10, end: 10 });
+    assert.deepEqual(result, { start: 10, end: 10 });
   });
 
   it('parses line range', () => {
     const result = parseLineSpec('10-20');
-    expect(result).toEqual({ start: 10, end: 20 });
+    assert.deepEqual(result, { start: 10, end: 20 });
   });
 
   it('parses single digit', () => {
     const result = parseLineSpec('1');
-    expect(result).toEqual({ start: 1, end: 1 });
+    assert.deepEqual(result, { start: 1, end: 1 });
   });
 
   it('trims whitespace', () => {
     const result = parseLineSpec('  10  ');
-    expect(result).toEqual({ start: 10, end: 10 });
+    assert.deepEqual(result, { start: 10, end: 10 });
   });
 
   it('throws on empty string', () => {
-    expect(() => parseLineSpec('')).toThrow('Line spec cannot be empty');
+    throwsWith(() => parseLineSpec(''), 'Line spec cannot be empty');
   });
 
   it('throws on invalid format', () => {
-    expect(() => parseLineSpec('abc')).toThrow('Invalid line spec');
+    throwsWith(() => parseLineSpec('abc'), 'Invalid line spec');
   });
 
   it('throws on negative numbers', () => {
-    expect(() => parseLineSpec('-1')).toThrow('Line numbers must be positive');
+    throwsWith(() => parseLineSpec('-1'), 'Line numbers must be positive');
   });
 
   it('throws on zero', () => {
-    expect(() => parseLineSpec('0')).toThrow('Line numbers must be positive');
+    throwsWith(() => parseLineSpec('0'), 'Line numbers must be positive');
   });
 
   it('throws on invalid range', () => {
-    expect(() => parseLineSpec('20-10')).toThrow('start (20) must be <= end (10)');
+    throwsWith(() => parseLineSpec('20-10'), 'start (20) must be <= end (10)');
   });
 
   it('throws on extra characters', () => {
-    expect(() => parseLineSpec('10-20-30')).toThrow('Invalid line spec');
+    throwsWith(() => parseLineSpec('10-20-30'), 'Invalid line spec');
   });
 });
 
 describe('parseLineSpecs', () => {
   it('parses comma-separated specs', () => {
     const result = parseLineSpecs('10,20-30');
-    expect(result).toEqual([
+    assert.deepEqual(result, [
       { start: 10, end: 10 },
       { start: 20, end: 30 },
     ]);
@@ -58,12 +60,12 @@ describe('parseLineSpecs', () => {
 
   it('parses single spec', () => {
     const result = parseLineSpecs('15');
-    expect(result).toEqual([{ start: 15, end: 15 }]);
+    assert.deepEqual(result, [{ start: 15, end: 15 }]);
   });
 
   it('trims whitespace around commas', () => {
     const result = parseLineSpecs('10 , 20-30 , 5');
-    expect(result).toEqual([
+    assert.deepEqual(result, [
       { start: 10, end: 10 },
       { start: 20, end: 30 },
       { start: 5, end: 5 },
@@ -71,10 +73,10 @@ describe('parseLineSpecs', () => {
   });
 
   it('throws on empty string', () => {
-    expect(() => parseLineSpecs('')).toThrow('At least one line spec is required');
+    throwsWith(() => parseLineSpecs(''), 'At least one line spec is required');
   });
 
   it('throws if any spec is invalid', () => {
-    expect(() => parseLineSpecs('10,invalid')).toThrow('Invalid line spec');
+    throwsWith(() => parseLineSpecs('10,invalid'), 'Invalid line spec');
   });
 });

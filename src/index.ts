@@ -1,4 +1,3 @@
-import { $ } from 'bun';
 import { parseArgs } from 'node:util';
 import { existsSync, statSync } from 'node:fs';
 import process from 'node:process';
@@ -32,11 +31,13 @@ import {
   promptForReplacements,
   warnMultiCommitRemoval,
 } from './prompts.ts';
-import { performFileRemoval, performRebase } from './rebase.ts';
-import { describeError } from './shell.ts';
+import { performFileRemoval } from './rebase.ts';
+import { chooseEngine, describeEngine, ENGINE_ENV_VAR, rewriteCommits } from './rewrite.ts';
+import { describeError, git } from './shell.ts';
 import type { ContentHit, LineInfo } from './types.ts';
 
 const MIN_GIT_VERSION = '2.22.0';
+const MIN_NODE_MAJOR = 26;
 
 interface RewriteContext {
   currentBranch: string;
@@ -44,12 +45,27 @@ interface RewriteContext {
   backupBranch: string;
 }
 
+// Bun reports an older Node compatibility version (26.3 for Bun 1.4), so the
+// guard only applies when actually running on Node.
+function checkRuntime(): void {
+  if (process.versions.bun) {
+    return;
+  }
+
+  const major = Number.parseInt(process.versions.node.split('.')[0] ?? '0', 10);
+
+  if (major < MIN_NODE_MAJOR) {
+    console.error(`${ICONS.error} Node.js ${MIN_NODE_MAJOR} or newer is required (found ${process.versions.node}).`);
+    process.exit(1);
+  }
+}
+
 function installSignalHandlers(): void {
   const abort = async (signal: NodeJS.Signals) => {
     console.error(`\n${ICONS.warning} Received ${signal}, attempting to abort any in-progress rebase...`);
     try {
       if (await isRebaseInProgress()) {
-        await $`git rebase --abort`.quiet();
+        await git(['rebase', '--abort']);
         console.error(`${ICONS.error} Rebase aborted.`);
       }
     } catch {
@@ -67,10 +83,11 @@ function installSignalHandlers(): void {
 }
 
 async function main(): Promise<void> {
+  checkRuntime();
   installSignalHandlers();
 
   const { values, positionals } = parseArgs({
-    args: Bun.argv.slice(2),
+    args: process.argv.slice(2),
     options: {
       file: {
         type: 'string',
@@ -267,9 +284,12 @@ async function handleLineReplacement(
     console.log(`  Commit ${commit.commitHash.substring(0, 7)}: ${commit.lines.length} line(s)`);
   }
 
+  const engine = await chooseEngine(commitsToRewrite, file);
+  console.log(`\nRewrite engine: ${describeEngine(engine.engine)} (${engine.reason})`);
+
   const hasRemote = await hasRemoteCommits();
   warnAboutRemote(hasRemote);
-  printResetHint('rebase', currentBranch);
+  printResetHint('rewrite', currentBranch);
 
   if (dryRun) {
     const proceed = await confirmAction('Proceed with dry-run?');
@@ -279,7 +299,7 @@ async function handleLineReplacement(
       process.exit(0);
     }
 
-    await performRebase(commitsToRewrite, file, true);
+    await rewriteCommits(commitsToRewrite, file, engine, true);
     outro('Dry-run completed. No changes were made.');
     process.exit(0);
   }
@@ -299,10 +319,10 @@ async function handleLineReplacement(
   const context: RewriteContext = { currentBranch, hasRemote, backupBranch };
 
   try {
-    await performRebase(commitsToRewrite, file, false);
-    console.log('\nRebase completed successfully.');
+    await rewriteCommits(commitsToRewrite, file, engine, false);
+    console.log('\nHistory rewrite completed successfully.');
   } catch (error) {
-    await restoreFromBackup('rebase', error, backupBranch);
+    await restoreFromBackup(describeEngine(engine.engine), error, backupBranch);
   }
 
   const originalContents = commitsToRewrite.flatMap((commit) => commit.lines.map((line) => line.originalContent));
@@ -407,13 +427,13 @@ async function restoreFromBackup(operation: string, error: unknown, backupBranch
 
   try {
     if (await isRebaseInProgress()) {
-      await $`git rebase --abort`.quiet();
+      await git(['rebase', '--abort']);
     }
   } catch {
     // best-effort
   }
 
-  await $`git reset --hard ${backupBranch}`;
+  await git(['reset', '--hard', backupBranch], { echo: true });
   console.error(`Restored to backup branch: ${backupBranch}`);
   process.exit(1);
 }
@@ -429,7 +449,7 @@ async function finalizeRewrite(
   const removeBackup = await confirmAction(`Remove backup branch ${backupBranch}?`, true);
 
   if (removeBackup) {
-    await $`git branch -D ${backupBranch}`.quiet();
+    await git(['branch', '-D', backupBranch]);
     console.log(`Backup branch ${backupBranch} removed.`);
   } else {
     console.warn(`${ICONS.warning} Backup branch retained. The private data remains recoverable via this branch.`);
@@ -498,6 +518,7 @@ Git Private Data Remover
 Remove accidentally committed private data from git history by rewriting specific lines in their originating commits.
 
 Usage:
+  node src/index.ts [options]      (Node.js 26+)
   bun run src/index.ts [options]
 
 Options:
@@ -508,6 +529,11 @@ Options:
   -r, --rm              Completely remove the file from the current branch's history
   -d, --dry-run         Show what would be changed without modifying history
   -h, --help            Show this help message
+
+Environment:
+  ${ENGINE_ENV_VAR}=auto|history|rebase
+                        Line rewrites use "git history fixup" when Git 2.55+ provides it,
+                        otherwise "git rebase -i". Set this to force one engine.
 
 Examples:
   bun run src/index.ts -w . -f config.json -l 15

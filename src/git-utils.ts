@@ -1,10 +1,13 @@
-import { $ } from 'bun';
-import { realpathSync } from 'node:fs';
+import { existsSync, realpathSync } from 'node:fs';
 import { isAbsolute, relative, resolve, sep } from 'node:path';
+import { git, gitText } from './shell.ts';
 import type { CommitReplacements, ContentHit, LineInfo, LineRange, RepoFile, Replacement } from './types.ts';
 
+// SHA-1 repositories use 40 hex digits, SHA-256 repositories (`git init --object-format=sha256`) use 64.
+const BLAME_HEADER = /^([a-f0-9]{40}|[a-f0-9]{64}) (\d+) (\d+)/;
+
 export async function checkGitVersion(minVersion: string): Promise<void> {
-  const versionOutput = await $`git --version`.text();
+  const versionOutput = await gitText(['--version']);
   const match = versionOutput.match(/git version (\d+)\.(\d+)\.(\d+)/);
 
   if (!match) {
@@ -34,7 +37,7 @@ function compareVersions(a: string, b: string): number {
 }
 
 export async function resolveRepoFile(file: string): Promise<RepoFile> {
-  const toplevel = (await $`git rev-parse --show-toplevel`.quiet().text()).trim();
+  const toplevel = (await gitText(['rev-parse', '--show-toplevel'])).trim();
   const absolute = resolve(realpathSync(process.cwd()), file);
   const rel = relative(toplevel, absolute);
 
@@ -43,13 +46,13 @@ export async function resolveRepoFile(file: string): Promise<RepoFile> {
   }
 
   const relativePath = rel.split(sep).join('/');
-  const tracked = await $`git ls-files --error-unmatch -- ${relativePath}`.cwd(toplevel).nothrow().quiet();
+  const tracked = await git(['ls-files', '--error-unmatch', '--', relativePath], { cwd: toplevel, nothrow: true });
 
   return { toplevel, relativePath, tracked: tracked.exitCode === 0 };
 }
 
 export async function getLineBlameInfo(file: string, lineRange: LineRange): Promise<LineInfo[]> {
-  const output = await $`git blame -L ${lineRange.start},${lineRange.end} -p -- ${file}`.text();
+  const output = await gitText(['blame', '-L', `${lineRange.start},${lineRange.end}`, '-p', '--', file]);
   const lines = output.trim().split('\n');
   const result: LineInfo[] = [];
   const filenames = new Map<string, string>();
@@ -58,11 +61,12 @@ export async function getLineBlameInfo(file: string, lineRange: LineRange): Prom
   let currentFinalLine = 0;
 
   for (const line of lines) {
-    if (line.match(/^[a-f0-9]{40} /)) {
-      const parts = line.split(' ');
-      currentCommit = parts[0];
-      currentOriginalLine = Number.parseInt(parts[1], 10);
-      currentFinalLine = Number.parseInt(parts[2], 10);
+    const header = line.match(BLAME_HEADER);
+
+    if (header) {
+      currentCommit = header[1];
+      currentOriginalLine = Number.parseInt(header[2], 10);
+      currentFinalLine = Number.parseInt(header[3], 10);
     } else if (line.startsWith('filename ')) {
       filenames.set(currentCommit, line.slice('filename '.length));
     } else if (line.startsWith('\t')) {
@@ -94,29 +98,29 @@ export function dedupeLineInfos(lines: LineInfo[]): LineInfo[] {
 }
 
 export async function getCommitInfo(commitHash: string): Promise<{ hash: string; subject: string }> {
-  const output = await $`git log -1 --format=%H%n%s ${commitHash}`.text();
+  const output = await gitText(['log', '-1', '--format=%H%n%s', commitHash]);
   const [hash, subject] = output.trim().split('\n');
   return { hash: hash.trim(), subject: (subject ?? '').trim() };
 }
 
 export async function getHeadCommit(): Promise<string> {
-  return (await $`git rev-parse HEAD`.quiet().text()).trim();
+  return (await gitText(['rev-parse', 'HEAD'])).trim();
 }
 
 export async function createBackupBranch(originalBranch: string): Promise<string> {
   const timestamp = Date.now();
   const backupBranch = `backup/${originalBranch}/${timestamp}`;
-  await $`git branch ${backupBranch}`;
+  await git(['branch', backupBranch]);
   return backupBranch;
 }
 
 export async function getCurrentBranch(): Promise<string> {
-  return (await $`git branch --show-current`.text()).trim();
+  return (await gitText(['branch', '--show-current'])).trim();
 }
 
 export async function hasMergeCommitsInRange(earliestCommit: string): Promise<boolean> {
-  const ranged = await $`git rev-list --merges ${earliestCommit}^..HEAD`.nothrow().quiet();
-  const output = ranged.exitCode === 0 ? ranged.text() : await $`git rev-list --merges HEAD`.quiet().text();
+  const ranged = await git(['rev-list', '--merges', `${earliestCommit}^..HEAD`], { nothrow: true });
+  const output = ranged.exitCode === 0 ? ranged.stdout : await gitText(['rev-list', '--merges', 'HEAD']);
   return output.trim() !== '';
 }
 
@@ -125,7 +129,7 @@ export async function sortCommitsTopologically(hashes: string[]): Promise<string
     return [...hashes];
   }
 
-  const output = await $`git log --topo-order --reverse --format=%H ${hashes}`.text();
+  const output = await gitText(['log', '--topo-order', '--reverse', '--format=%H', ...hashes]);
   const ordered = output.trim().split('\n').filter(Boolean);
 
   const wanted = new Set(hashes);
@@ -165,6 +169,7 @@ export async function groupReplacementsByCommit(
 
     existing.lines.push({
       lineNumber: info.originalLineNumber,
+      headLineNumber: info.lineNumber,
       originalContent: info.content,
       replacementContent: replacement,
     });
@@ -193,47 +198,39 @@ export async function groupReplacementsByCommit(
 }
 
 export async function hasRemoteCommits(): Promise<boolean> {
-  try {
-    await $`git rev-parse --abbrev-ref --symbolic-full-name @{u}`.quiet();
-    return true;
-  } catch {
-    return false;
-  }
+  const upstream = await git(['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{u}'], { nothrow: true });
+  return upstream.exitCode === 0;
 }
 
 export async function isGitRepoClean(): Promise<boolean> {
-  const status = await $`git status --porcelain -uno`.text();
+  const status = await gitText(['status', '--porcelain', '-uno']);
   return status.trim() === '';
 }
 
 export async function isRebaseInProgress(): Promise<boolean> {
-  try {
-    const gitDir = (await $`git rev-parse --git-dir`.text()).trim();
-    const merge = await Bun.file(`${gitDir}/rebase-merge`).exists();
-    const apply = await Bun.file(`${gitDir}/rebase-apply`).exists();
-    return merge || apply;
-  } catch {
+  const gitDir = await git(['rev-parse', '--git-dir'], { nothrow: true });
+
+  if (gitDir.exitCode !== 0) {
     return false;
   }
+
+  const dir = gitDir.stdout.trim();
+  return existsSync(`${dir}/rebase-merge`) || existsSync(`${dir}/rebase-apply`);
 }
 
 export async function purgeReflogAndGc(): Promise<void> {
-  await $`git reflog expire --expire=now --all`;
-  await $`git gc --prune=now --aggressive`;
+  await git(['reflog', 'expire', '--expire=now', '--all']);
+  await git(['gc', '--prune=now', '--aggressive'], { echo: true });
 }
 
 export async function getCommitsTouchingFile(filePath: string): Promise<string[]> {
-  try {
-    const output = await $`git log --follow --format=%H -- ${filePath}`.text();
-    return output.trim().split('\n').filter(Boolean);
-  } catch {
-    return [];
-  }
+  const output = await git(['log', '--follow', '--format=%H', '--', filePath], { nothrow: true });
+  return output.exitCode === 0 ? output.stdout.trim().split('\n').filter(Boolean) : [];
 }
 
 export async function getCommitsTouchingFileInAllRefs(filePath: string): Promise<string[]> {
-  const output = await $`git log --all --format=%H -- ${filePath}`.nothrow().quiet();
-  return output.exitCode === 0 ? output.text().trim().split('\n').filter(Boolean) : [];
+  const output = await git(['log', '--all', '--format=%H', '--', filePath], { nothrow: true });
+  return output.exitCode === 0 ? output.stdout.trim().split('\n').filter(Boolean) : [];
 }
 
 export async function findCommitsContainingLines(files: string[], contents: string[]): Promise<ContentHit[]> {
@@ -246,13 +243,13 @@ export async function findCommitsContainingLines(files: string[], contents: stri
 
   for (const file of Array.from(new Set(files))) {
     for (const hash of await getCommitsTouchingFileInAllRefs(file)) {
-      const shown = await $`git show ${hash}:${file}`.nothrow().quiet();
+      const shown = await git(['show', `${hash}:${file}`], { nothrow: true });
 
       if (shown.exitCode !== 0) {
         continue;
       }
 
-      const fileLines = new Set(shown.text().split('\n'));
+      const fileLines = new Set(shown.stdout.split('\n'));
       const found = wanted.filter((content) => fileLines.has(content));
 
       if (found.length > 0) {
@@ -265,7 +262,6 @@ export async function findCommitsContainingLines(files: string[], contents: stri
 }
 
 export async function getRefsContaining(commitHash: string): Promise<string[]> {
-  const format = '%(refname)';
-  const output = await $`git for-each-ref --contains ${commitHash} --format=${format}`.nothrow().quiet();
-  return output.exitCode === 0 ? output.text().trim().split('\n').filter(Boolean) : [];
+  const output = await git(['for-each-ref', '--contains', commitHash, '--format=%(refname)'], { nothrow: true });
+  return output.exitCode === 0 ? output.stdout.trim().split('\n').filter(Boolean) : [];
 }

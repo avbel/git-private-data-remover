@@ -1,9 +1,9 @@
-import { $ } from 'bun';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { unlink } from 'node:fs/promises';
+import { unlink, writeFile } from 'node:fs/promises';
+import process from 'node:process';
 import { ICONS } from './prompts.ts';
-import { describeError } from './shell.ts';
+import { describeError, git, gitText } from './shell.ts';
 import type { CommitReplacements } from './types.ts';
 
 export async function rewriteCommit(
@@ -11,7 +11,7 @@ export async function rewriteCommit(
   file: string,
   replacements: CommitReplacements['lines'],
 ): Promise<void> {
-  const content = (await $`git show HEAD:${file}`.quiet().text()).split('\n');
+  const content = (await gitText(['show', `HEAD:${file}`])).split('\n');
 
   for (const replacement of replacements) {
     const lineIndex = replacement.lineNumber - 1;
@@ -29,13 +29,13 @@ export async function rewriteCommit(
     content[lineIndex] = replacement.replacementContent;
   }
 
-  await Bun.write(file, content.join('\n'));
-  await $`git add -- ${file}`;
-  await $`git commit --amend --no-edit --no-verify`.quiet();
+  await writeFile(file, content.join('\n'));
+  await git(['add', '--', file]);
+  await git(['commit', '--amend', '--no-edit', '--no-verify', '--allow-empty']);
 }
 
 async function isRootCommit(commitHash: string): Promise<boolean> {
-  const result = await $`git rev-parse --verify ${commitHash}^`.nothrow().quiet();
+  const result = await git(['rev-parse', '--verify', `${commitHash}^`], { nothrow: true });
   return result.exitCode !== 0;
 }
 
@@ -57,7 +57,7 @@ export async function performRebase(commits: CommitReplacements[], file: string,
   }
 
   const todoFile = join(tmpdir(), `git-rebase-todo-${Date.now()}`);
-  await Bun.write(todoFile, modifiedTodo);
+  await writeFile(todoFile, modifiedTodo);
 
   const env = {
     ...process.env,
@@ -66,18 +66,14 @@ export async function performRebase(commits: CommitReplacements[], file: string,
   };
 
   try {
-    if (root) {
-      await $`git rebase -i --root`.env(env);
-    } else {
-      await $`git rebase -i ${earliestCommit}^`.env(env);
-    }
+    await git(['rebase', '-i', root ? '--root' : `${earliestCommit}^`], { env });
 
     for (const commit of commits) {
       await rewriteCommit(commit.commitHash, commit.file ?? file, commit.lines);
-      await $`git rebase --continue`.env(env);
+      await git(['rebase', '--continue'], { env });
     }
   } catch (error) {
-    await $`git rebase --abort`.env(env).nothrow().quiet();
+    await git(['rebase', '--abort'], { env, nothrow: true });
     throw new Error(`Rebase failed: ${describeError(error)}`);
   } finally {
     await unlink(todoFile).catch(() => {});
@@ -85,14 +81,12 @@ export async function performRebase(commits: CommitReplacements[], file: string,
 }
 
 async function generateTodoList(parentCommit: string): Promise<string> {
-  const format = 'pick %H %s';
-  const output = await $`git log --reverse --format=${format} ${parentCommit}..HEAD`.text();
+  const output = await gitText(['log', '--reverse', '--format=pick %H %s', `${parentCommit}..HEAD`]);
   return output.trim();
 }
 
 async function generateTodoListForRoot(): Promise<string> {
-  const format = 'pick %H %s';
-  const output = await $`git log --reverse --format=${format}`.text();
+  const output = await gitText(['log', '--reverse', '--format=pick %H %s']);
   return output.trim();
 }
 
@@ -114,7 +108,7 @@ function modifyTodoForEdits(todo: string, commits: CommitReplacements[]): string
 }
 
 export async function isFilterRepoAvailable(): Promise<boolean> {
-  const result = await $`git filter-repo --version`.nothrow().quiet();
+  const result = await git(['filter-repo', '--version'], { nothrow: true });
   return result.exitCode === 0;
 }
 
@@ -123,12 +117,12 @@ export async function performFileRemoval(filePath: string, currentBranch: string
 
   if (await isFilterRepoAvailable()) {
     console.log(`Using git filter-repo to remove ${filePath} from ${currentBranch}...`);
-    const result = await $`git filter-repo --force --refs ${branchRef} --path ${filePath} --invert-paths`
-      .nothrow()
-      .quiet();
+    const result = await git(['filter-repo', '--force', '--refs', branchRef, '--path', filePath, '--invert-paths'], {
+      nothrow: true,
+    });
 
     if (result.exitCode !== 0) {
-      throw new Error(`git filter-repo failed: ${result.stderr.toString().trim()}`);
+      throw new Error(`git filter-repo failed: ${result.stderr.trim()}`);
     }
 
     return;
@@ -136,8 +130,7 @@ export async function performFileRemoval(filePath: string, currentBranch: string
 
   console.log(`git filter-repo not available. Using git filter-branch to remove ${filePath}...`);
 
-  const branchFormat = '%(refname:short)';
-  const otherBranches = (await $`git branch --format=${branchFormat}`.text())
+  const otherBranches = (await gitText(['branch', '--format=%(refname:short)']))
     .trim()
     .split('\n')
     .filter((b) => b !== '' && b !== currentBranch);
@@ -150,11 +143,11 @@ export async function performFileRemoval(filePath: string, currentBranch: string
 
   const escapedPath = filePath.replace(/[\\"$`]/g, '\\$&');
   const filterCommand = `git rm --cached --ignore-unmatch --quiet -- "${escapedPath}"`;
-  const result = await $`git filter-branch --force --index-filter ${filterCommand} HEAD`.nothrow().quiet();
+  const result = await git(['filter-branch', '--force', '--index-filter', filterCommand, 'HEAD'], { nothrow: true });
 
   if (result.exitCode !== 0) {
-    throw new Error(`git filter-branch failed: ${result.stderr.toString().trim()}`);
+    throw new Error(`git filter-branch failed: ${result.stderr.trim()}`);
   }
 
-  await $`git update-ref -d ${`refs/original/${branchRef}`}`.nothrow().quiet();
+  await git(['update-ref', '-d', `refs/original/${branchRef}`], { nothrow: true });
 }

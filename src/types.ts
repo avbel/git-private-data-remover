@@ -12,7 +12,10 @@ export interface LineInfo {
 }
 
 export interface Replacement {
+  /** Line number inside the originating commit. */
   lineNumber: number;
+  /** Line number of the same line in the HEAD version of the file. */
+  headLineNumber: number;
   originalContent: string;
   replacementContent: string;
 }
@@ -22,6 +25,8 @@ export interface CommitReplacements {
   file?: string;
   lines: Replacement[];
 }
+
+export type RewriteEngine = 'history' | 'rebase';
 
 export interface RepoFile {
   toplevel: string;
