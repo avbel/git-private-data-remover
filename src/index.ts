@@ -1,49 +1,16 @@
 import { parseArgs } from 'node:util';
 import { existsSync, statSync } from 'node:fs';
 import process from 'node:process';
-import { parseLineSpecs } from './parser.ts';
-import {
-  checkGitVersion,
-  createBackupBranch,
-  dedupeLineInfos,
-  findCommitsContainingLines,
-  getCommitInfo,
-  getCommitsTouchingFile,
-  getCommitsTouchingFileInAllRefs,
-  getCurrentBranch,
-  getLineBlameInfo,
-  getRefsContaining,
-  groupReplacementsByCommit,
-  hasMergeCommitsInRange,
-  hasRemoteCommits,
-  isGitRepoClean,
-  isRebaseInProgress,
-  purgeReflogAndGc,
-  resolveRepoFile,
-  sortCommitsTopologically,
-} from './git-utils.ts';
-import {
-  ICONS,
-  cancel,
-  confirmAction,
-  confirmCommit,
-  outro,
-  promptForReplacements,
-  warnMultiCommitRemoval,
-} from './prompts.ts';
-import { performFileRemoval } from './rebase.ts';
-import { chooseEngine, describeEngine, ENGINE_ENV_VAR, rewriteCommits } from './rewrite.ts';
-import { describeError, git } from './shell.ts';
-import type { ContentHit, LineInfo } from './types.ts';
+import { checkGitVersion, getCurrentBranch, getIndexFlag, isGitRepoClean, resolveRepoFile } from './git-utils.ts';
+import { handleLineReplacement } from './line-mode.ts';
+import { ICONS } from './prompts.ts';
+import { handleFileRemoval } from './remove-mode.ts';
+import { ENGINE_ENV_VAR } from './rewrite.ts';
+import { installSignalHandlers } from './session.ts';
+import { describeError } from './shell.ts';
 
 const MIN_GIT_VERSION = '2.22.0';
 const MIN_NODE_MAJOR = 26;
-
-interface RewriteContext {
-  currentBranch: string;
-  hasRemote: boolean;
-  backupBranch: string;
-}
 
 // Bun reports an older Node compatibility version (26.3 for Bun 1.4), so the
 // guard only applies when actually running on Node.
@@ -58,28 +25,6 @@ function checkRuntime(): void {
     console.error(`${ICONS.error} Node.js ${MIN_NODE_MAJOR} or newer is required (found ${process.versions.node}).`);
     process.exit(1);
   }
-}
-
-function installSignalHandlers(): void {
-  const abort = async (signal: NodeJS.Signals) => {
-    console.error(`\n${ICONS.warning} Received ${signal}, attempting to abort any in-progress rebase...`);
-    try {
-      if (await isRebaseInProgress()) {
-        await git(['rebase', '--abort']);
-        console.error(`${ICONS.error} Rebase aborted.`);
-      }
-    } catch {
-      // best-effort
-    }
-    process.exit(130);
-  };
-
-  process.on('SIGINT', () => {
-    void abort('SIGINT');
-  });
-  process.on('SIGTERM', () => {
-    void abort('SIGTERM');
-  });
 }
 
 async function main(): Promise<void> {
@@ -191,6 +136,16 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
+  const indexFlag = isRmOperation ? undefined : await getIndexFlag(file);
+
+  if (indexFlag) {
+    console.error(
+      `${ICONS.error} ${file} is marked ${indexFlag} in the index, so its working copy is not tracked by git status ` +
+        'and would be overwritten. Clear the flag (git update-index --no-skip-worktree / --no-assume-unchanged) first.',
+    );
+    process.exit(1);
+  }
+
   console.log(`Checking file: ${file}`);
 
   if (dryRun) {
@@ -203,312 +158,6 @@ async function main(): Promise<void> {
   }
 
   await handleLineReplacement(file, currentBranch, lineSpecs!, dryRun);
-}
-
-async function handleLineReplacement(
-  file: string,
-  currentBranch: string,
-  lineSpecs: string,
-  dryRun: boolean,
-): Promise<void> {
-  console.log(`Line specs: ${lineSpecs}`);
-
-  const ranges = parseLineSpecs(lineSpecs);
-  const lineInfos: LineInfo[][] = [];
-
-  for (const range of ranges) {
-    const info = await getLineBlameInfo(file, range);
-    lineInfos.push(info);
-  }
-
-  const allLines = dedupeLineInfos(lineInfos.flat());
-
-  if (allLines.length === 0) {
-    cancel('No lines found matching the specified ranges');
-    process.exit(1);
-  }
-
-  console.log(`\nFound ${allLines.length} line(s) to process`);
-
-  const uniqueCommits = Array.from(new Set(allLines.map((line) => line.commitHash)));
-  console.log(`Spanning ${uniqueCommits.length} commit(s)`);
-
-  const orderedCommits = await sortCommitsTopologically(uniqueCommits);
-
-  if (await hasMergeCommitsInRange(orderedCommits[0])) {
-    console.error(
-      `${ICONS.error} Merge commits exist in the rebase range. This tool does not support rewriting history that contains merge commits.`,
-    );
-    process.exit(1);
-  }
-
-  const linesByCommit = new Map<string, LineInfo[]>();
-  for (const hash of orderedCommits) {
-    linesByCommit.set(hash, []);
-  }
-  for (const line of allLines) {
-    linesByCommit.get(line.commitHash)?.push(line);
-  }
-
-  const confirmedCommits = new Set<string>();
-
-  for (const [commitHash, lines] of linesByCommit) {
-    const { subject } = await getCommitInfo(commitHash);
-    const confirmed = await confirmCommit(commitHash, subject, lines);
-
-    if (confirmed) {
-      confirmedCommits.add(commitHash);
-    }
-  }
-
-  if (confirmedCommits.size === 0) {
-    cancel('No commits selected for modification');
-    process.exit(0);
-  }
-
-  const filteredLines = allLines.filter((line) => confirmedCommits.has(line.commitHash));
-
-  console.log(`\nProceeding with ${filteredLines.length} line(s) from ${confirmedCommits.size} commit(s)`);
-
-  const replacements = await promptForReplacements(filteredLines);
-  const commitsToRewrite = await groupReplacementsByCommit(filteredLines, replacements);
-
-  if (commitsToRewrite.length === 0) {
-    cancel('No replacements specified');
-    process.exit(0);
-  }
-
-  console.log(`\nWill rewrite ${commitsToRewrite.length} commit(s)`);
-
-  for (const commit of commitsToRewrite) {
-    console.log(`  Commit ${commit.commitHash.substring(0, 7)}: ${commit.lines.length} line(s)`);
-  }
-
-  const engine = await chooseEngine(commitsToRewrite, file);
-  console.log(`\nRewrite engine: ${describeEngine(engine.engine)} (${engine.reason})`);
-
-  const hasRemote = await hasRemoteCommits();
-  warnAboutRemote(hasRemote);
-  printResetHint('rewrite', currentBranch);
-
-  if (dryRun) {
-    const proceed = await confirmAction('Proceed with dry-run?');
-
-    if (!proceed) {
-      cancel('Dry-run cancelled');
-      process.exit(0);
-    }
-
-    await rewriteCommits(commitsToRewrite, file, engine, true);
-    outro('Dry-run completed. No changes were made.');
-    process.exit(0);
-  }
-
-  const backupBranch = await createBackupBranch(currentBranch);
-  printBackupHint(backupBranch);
-
-  const proceed = await confirmAction(
-    `Are you sure you want to rewrite history? This will modify ${commitsToRewrite.length} commit(s).`,
-  );
-
-  if (!proceed) {
-    cancel('Operation cancelled');
-    process.exit(0);
-  }
-
-  const context: RewriteContext = { currentBranch, hasRemote, backupBranch };
-
-  try {
-    await rewriteCommits(commitsToRewrite, file, engine, false);
-    console.log('\nHistory rewrite completed successfully.');
-  } catch (error) {
-    await restoreFromBackup(describeEngine(engine.engine), error, backupBranch);
-  }
-
-  const originalContents = commitsToRewrite.flatMap((commit) => commit.lines.map((line) => line.originalContent));
-  const filesToScan = [file, ...commitsToRewrite.map((commit) => commit.file ?? file)];
-
-  await finalizeRewrite(
-    context,
-    () => findCommitsContainingLines(filesToScan, originalContents),
-    'Done! Private data has been removed from local git history.',
-  );
-}
-
-async function handleFileRemoval(file: string, currentBranch: string, dryRun: boolean): Promise<void> {
-  const commits = await getCommitsTouchingFile(file);
-
-  if (commits.length === 0) {
-    cancel('File was not found in git history');
-    process.exit(0);
-  }
-
-  console.log(`File found in ${commits.length} commit(s)`);
-
-  if (commits.length > 1) {
-    const confirmed = await warnMultiCommitRemoval(commits.length);
-    if (!confirmed) {
-      cancel('Operation cancelled');
-      process.exit(0);
-    }
-  }
-
-  if (dryRun) {
-    console.log(`\n[DRY RUN] Would remove ${file} from ${commits.length} commit(s):`);
-    for (const hash of commits) {
-      const { subject } = await getCommitInfo(hash);
-      console.log(`  ${hash.substring(0, 7)}: ${subject}`);
-    }
-    outro('Dry-run completed. No changes were made.');
-    process.exit(0);
-  }
-
-  const hasRemote = await hasRemoteCommits();
-  warnAboutRemote(hasRemote);
-  printResetHint('removal', currentBranch);
-
-  const backupBranch = await createBackupBranch(currentBranch);
-  printBackupHint(backupBranch);
-
-  const proceed = await confirmAction(
-    `Are you sure you want to permanently remove ${file} from the history of ${currentBranch}?`,
-  );
-
-  if (!proceed) {
-    cancel('Operation cancelled');
-    process.exit(0);
-  }
-
-  const context: RewriteContext = { currentBranch, hasRemote, backupBranch };
-
-  try {
-    await performFileRemoval(file, currentBranch);
-    console.log('\nFile removal completed successfully.');
-  } catch (error) {
-    await restoreFromBackup('file removal', error, backupBranch);
-  }
-
-  await finalizeRewrite(
-    context,
-    async () => {
-      const remaining = await getCommitsTouchingFileInAllRefs(file);
-      return remaining.map((hash) => ({ hash, file, lines: [] }));
-    },
-    'Done! File has been removed from local git history.',
-  );
-}
-
-function warnAboutRemote(hasRemote: boolean): void {
-  if (!hasRemote) {
-    return;
-  }
-
-  console.warn(`\n${ICONS.warning} WARNING: This repository has a remote upstream.`);
-  console.warn('Rewriting history will require force-pushing to the remote.');
-  console.warn('This can affect other collaborators.');
-  console.warn('Note: remote copies and existing clones will still contain the private data after this operation.');
-}
-
-function printResetHint(operation: string, currentBranch: string): void {
-  console.log(
-    `\n${ICONS.info} If anything goes wrong during the ${operation}, you can always reset to the current state with:`,
-  );
-  console.log(`  git reset --hard ${currentBranch}`);
-}
-
-function printBackupHint(backupBranch: string): void {
-  console.log(`\nCreated backup branch: ${backupBranch}`);
-  console.log(`If anything goes wrong, recover with: git reset --hard ${backupBranch}`);
-}
-
-async function restoreFromBackup(operation: string, error: unknown, backupBranch: string): Promise<never> {
-  console.error(`\n${ICONS.error} Error during ${operation}:`, describeError(error));
-  console.error('\nRestoring from backup branch...');
-
-  try {
-    if (await isRebaseInProgress()) {
-      await git(['rebase', '--abort']);
-    }
-  } catch {
-    // best-effort
-  }
-
-  await git(['reset', '--hard', backupBranch], { echo: true });
-  console.error(`Restored to backup branch: ${backupBranch}`);
-  process.exit(1);
-}
-
-async function finalizeRewrite(
-  context: RewriteContext,
-  findLeftovers: () => Promise<ContentHit[]>,
-  doneMessage: string,
-): Promise<void> {
-  const { backupBranch, currentBranch, hasRemote } = context;
-
-  console.warn(`\n${ICONS.warning} The backup branch ${backupBranch} still contains the ORIGINAL private data.`);
-  const removeBackup = await confirmAction(`Remove backup branch ${backupBranch}?`, true);
-
-  if (removeBackup) {
-    await git(['branch', '-D', backupBranch]);
-    console.log(`Backup branch ${backupBranch} removed.`);
-  } else {
-    console.warn(`${ICONS.warning} Backup branch retained. The private data remains recoverable via this branch.`);
-  }
-
-  console.log('\nExpiring reflog and compressing git storage...');
-  await purgeReflogAndGc();
-  console.log('Git storage compressed.');
-
-  console.log('\nVerifying that the private data is no longer reachable from any ref...');
-  const leftovers = await findLeftovers();
-  const stillReachable = leftovers.length > 0;
-
-  if (stillReachable) {
-    await reportLeftovers(leftovers);
-  } else {
-    console.log(`${ICONS.success} No ref still contains the original data.`);
-  }
-
-  if (hasRemote) {
-    console.warn(`\n${ICONS.warning} Remember to force-push your changes:`);
-    console.warn(`  git push --force-with-lease origin ${currentBranch}`);
-    console.warn(`${ICONS.warning} Any existing clones, forks, or cached refs still contain the original data.`);
-  }
-
-  if (stillReachable) {
-    outro(`Branch ${currentBranch} was rewritten, but the private data is STILL reachable locally (see above).`);
-    return;
-  }
-
-  outro(doneMessage);
-}
-
-async function reportLeftovers(leftovers: ContentHit[]): Promise<void> {
-  const refs = new Set<string>();
-
-  console.warn(`\n${ICONS.warning} The original data is still present in ${leftovers.length} commit(s):`);
-
-  for (const hit of leftovers) {
-    const detail = hit.lines.length > 0 ? `${hit.lines.length} original line(s) in ${hit.file}` : hit.file;
-    console.warn(`  ${hit.hash.substring(0, 7)}: ${detail}`);
-
-    for (const ref of await getRefsContaining(hit.hash)) {
-      refs.add(ref);
-    }
-  }
-
-  if (refs.size > 0) {
-    console.warn('\nThese commits are kept alive by:');
-    for (const ref of refs) {
-      console.warn(`  ${ref}`);
-    }
-  }
-
-  console.warn(
-    '\nCommon causes: the secret line was modified again in a later commit (only the most recent version was rewritten),',
-  );
-  console.warn('other local branches still contain it, or a remote-tracking ref still points at the old history.');
-  console.warn('After force-pushing, run `git fetch --prune` and then `git gc --prune=now` to drop the old objects.');
 }
 
 function printUsage(): void {

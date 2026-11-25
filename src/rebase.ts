@@ -1,36 +1,22 @@
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { unlink, writeFile } from 'node:fs/promises';
-import process from 'node:process';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { applyLineEdits, readBlob, stageFileContent } from './blob.ts';
 import { ICONS } from './prompts.ts';
 import { describeError, git, gitText } from './shell.ts';
 import type { CommitReplacements } from './types.ts';
+
+const TODO_ENV_VAR = 'GIT_PRIVATE_DATA_REMOVER_TODO';
 
 export async function rewriteCommit(
   commitHash: string,
   file: string,
   replacements: CommitReplacements['lines'],
 ): Promise<void> {
-  const content = (await gitText(['show', `HEAD:${file}`])).split('\n');
+  const content = await readBlob('HEAD', file);
+  const updated = applyLineEdits(content, replacements, `${file} in commit ${commitHash}`);
 
-  for (const replacement of replacements) {
-    const lineIndex = replacement.lineNumber - 1;
-
-    if (lineIndex < 0 || lineIndex >= content.length) {
-      throw new Error(`Line ${replacement.lineNumber} does not exist in ${file} at commit ${commitHash}`);
-    }
-
-    if (content[lineIndex] !== replacement.originalContent) {
-      throw new Error(
-        `Content mismatch at line ${replacement.lineNumber} of ${file} in commit ${commitHash}: the line does not match what git blame reported`,
-      );
-    }
-
-    content[lineIndex] = replacement.replacementContent;
-  }
-
-  await writeFile(file, content.join('\n'));
-  await git(['add', '--', file]);
+  await stageFileContent('HEAD', file, updated);
   await git(['commit', '--amend', '--no-edit', '--no-verify', '--allow-empty']);
 }
 
@@ -56,12 +42,17 @@ export async function performRebase(commits: CommitReplacements[], file: string,
     return;
   }
 
-  const todoFile = join(tmpdir(), `git-rebase-todo-${Date.now()}`);
-  await writeFile(todoFile, modifiedTodo);
+  // A private mkdtemp directory (mode 0700) instead of a predictable name in the
+  // shared temp dir, where another local user could plant a symlink or swap in
+  // `exec` lines. Git runs the sequence editor through a shell, so the path is
+  // passed via the environment rather than spliced into the command string.
+  const todoDir = await mkdtemp(join(tmpdir(), 'git-private-data-remover-'));
+  const todoFile = join(todoDir, 'git-rebase-todo');
+  await writeFile(todoFile, modifiedTodo, { mode: 0o600 });
 
   const env = {
-    ...process.env,
-    GIT_SEQUENCE_EDITOR: `cp -f "${todoFile}"`,
+    [TODO_ENV_VAR]: todoFile,
+    GIT_SEQUENCE_EDITOR: `cp -f -- "$${TODO_ENV_VAR}"`,
     GIT_EDITOR: 'true',
   };
 
@@ -76,7 +67,7 @@ export async function performRebase(commits: CommitReplacements[], file: string,
     await git(['rebase', '--abort'], { env, nothrow: true });
     throw new Error(`Rebase failed: ${describeError(error)}`);
   } finally {
-    await unlink(todoFile).catch(() => {});
+    await rm(todoDir, { recursive: true, force: true });
   }
 }
 
@@ -112,12 +103,18 @@ export async function isFilterRepoAvailable(): Promise<boolean> {
   return result.exitCode === 0;
 }
 
-export async function performFileRemoval(filePath: string, currentBranch: string): Promise<void> {
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+export async function performFileRemoval(paths: readonly string[], currentBranch: string): Promise<void> {
   const branchRef = `refs/heads/${currentBranch}`;
+  const shown = paths.join(', ');
 
   if (await isFilterRepoAvailable()) {
-    console.log(`Using git filter-repo to remove ${filePath} from ${currentBranch}...`);
-    const result = await git(['filter-repo', '--force', '--refs', branchRef, '--path', filePath, '--invert-paths'], {
+    console.log(`Using git filter-repo to remove ${shown} from ${currentBranch}...`);
+    const pathArgs = paths.flatMap((path) => ['--path', path]);
+    const result = await git(['filter-repo', '--force', '--refs', branchRef, ...pathArgs, '--invert-paths'], {
       nothrow: true,
     });
 
@@ -128,7 +125,7 @@ export async function performFileRemoval(filePath: string, currentBranch: string
     return;
   }
 
-  console.log(`git filter-repo not available. Using git filter-branch to remove ${filePath}...`);
+  console.log(`git filter-repo not available. Using git filter-branch to remove ${shown}...`);
 
   const otherBranches = (await gitText(['branch', '--format=%(refname:short)']))
     .trim()
@@ -141,9 +138,13 @@ export async function performFileRemoval(filePath: string, currentBranch: string
     );
   }
 
-  const escapedPath = filePath.replace(/[\\"$`]/g, '\\$&');
-  const filterCommand = `git rm --cached --ignore-unmatch --quiet -- "${escapedPath}"`;
-  const result = await git(['filter-branch', '--force', '--index-filter', filterCommand, 'HEAD'], { nothrow: true });
+  const filterCommand = `git rm --cached --ignore-unmatch --quiet -- ${paths.map(shellQuote).join(' ')}`;
+  // The user has already confirmed; filter-branch's own deprecation warning
+  // would only add a 10 second sleep before it starts.
+  const result = await git(['filter-branch', '--force', '--index-filter', filterCommand, 'HEAD'], {
+    nothrow: true,
+    env: { FILTER_BRANCH_SQUELCH_WARNING: '1' },
+  });
 
   if (result.exitCode !== 0) {
     throw new Error(`git filter-branch failed: ${result.stderr.trim()}`);

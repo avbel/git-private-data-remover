@@ -466,7 +466,7 @@ describe('Git integration tests', () => {
     const commitsBefore = await getCommitsTouchingFile('secret.txt');
     assert.equal(commitsBefore.length, 1);
 
-    await performFileRemoval('secret.txt', await getCurrentBranch());
+    await performFileRemoval(['secret.txt'], await getCurrentBranch());
 
     const commitsAfter = await getCommitsTouchingFile('secret.txt');
     assert.equal(commitsAfter.length, 0);
@@ -498,7 +498,7 @@ describe('Git integration tests', () => {
     const commitsBefore = await getCommitsTouchingFile('multi.txt');
     assert.equal(commitsBefore.length, 3);
 
-    await performFileRemoval('multi.txt', await getCurrentBranch());
+    await performFileRemoval(['multi.txt'], await getCurrentBranch());
 
     const commitsAfter = await getCommitsTouchingFile('multi.txt');
     assert.equal(commitsAfter.length, 0);
@@ -514,7 +514,7 @@ describe('Git integration tests', () => {
 
     await git('branch', 'backup-before-removal');
 
-    await performFileRemoval('data.txt', await getCurrentBranch());
+    await performFileRemoval(['data.txt'], await getCurrentBranch());
 
     const branchList = await git('branch');
     includes(branchList, 'backup-before-removal');

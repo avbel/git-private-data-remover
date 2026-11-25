@@ -1,5 +1,6 @@
 import { existsSync, realpathSync } from 'node:fs';
 import { isAbsolute, relative, resolve, sep } from 'node:path';
+import { byteStringToText, bytesToByteString, encodeReplacement } from './bytes.ts';
 import { git, gitText } from './shell.ts';
 import type { CommitReplacements, ContentHit, LineInfo, LineRange, RepoFile, Replacement } from './types.ts';
 
@@ -52,8 +53,20 @@ export async function resolveRepoFile(file: string): Promise<RepoFile> {
 }
 
 export async function getLineBlameInfo(file: string, lineRange: LineRange): Promise<LineInfo[]> {
-  const output = await gitText(['blame', '-L', `${lineRange.start},${lineRange.end}`, '-p', '--', file]);
-  const lines = output.trim().split('\n');
+  // Blame HEAD's blob rather than the working file, so clean filters and
+  // textconv never alter the bytes compared against later. Not trimming keeps
+  // the trailing `\r` of the last line in CRLF files.
+  const output = await git([
+    'blame',
+    '--no-textconv',
+    '-p',
+    '-L',
+    `${lineRange.start},${lineRange.end}`,
+    'HEAD',
+    '--',
+    file,
+  ]);
+  const lines = bytesToByteString(output.stdoutBytes).split('\n');
   const result: LineInfo[] = [];
   const filenames = new Map<string, string>();
   let currentCommit = '';
@@ -68,7 +81,7 @@ export async function getLineBlameInfo(file: string, lineRange: LineRange): Prom
       currentOriginalLine = Number.parseInt(header[2], 10);
       currentFinalLine = Number.parseInt(header[3], 10);
     } else if (line.startsWith('filename ')) {
-      filenames.set(currentCommit, line.slice('filename '.length));
+      filenames.set(currentCommit, byteStringToText(line.slice('filename '.length)));
     } else if (line.startsWith('\t')) {
       const content = line.substring(1);
       result.push({
@@ -171,7 +184,7 @@ export async function groupReplacementsByCommit(
       lineNumber: info.originalLineNumber,
       headLineNumber: info.lineNumber,
       originalContent: info.content,
-      replacementContent: replacement,
+      replacementContent: encodeReplacement(info.content, replacement),
     });
 
     groups.set(info.commitHash, existing);
@@ -228,12 +241,50 @@ export async function getCommitsTouchingFile(filePath: string): Promise<string[]
   return output.exitCode === 0 ? output.stdout.trim().split('\n').filter(Boolean) : [];
 }
 
-export async function getCommitsTouchingFileInAllRefs(filePath: string): Promise<string[]> {
-  const output = await git(['log', '--all', '--format=%H', '--', filePath], { nothrow: true });
+export async function getCommitsTouchingFileInRefs(
+  filePath: string,
+  tipArgs: readonly string[] = ['--all'],
+): Promise<string[]> {
+  const output = await git(['log', '--format=%H', ...tipArgs, '--', filePath], { nothrow: true });
   return output.exitCode === 0 ? output.stdout.trim().split('\n').filter(Boolean) : [];
 }
 
-export async function findCommitsContainingLines(files: string[], contents: string[]): Promise<ContentHit[]> {
+export async function listStashCommits(): Promise<string[]> {
+  const output = await git(['stash', 'list', '--format=%H'], { nothrow: true });
+  return output.exitCode === 0 ? output.stdout.trim().split('\n').filter(Boolean) : [];
+}
+
+// Every place the original data could still be reachable from, except the
+// backup branch (which holds it by design until the user deletes it). `--all`
+// only sees the newest stash, so older stash entries are added explicitly. The
+// reflog is deliberately left out: right after a rewrite it always still points
+// at the old commits, until the storage purge.
+export async function scanTipArgs(excludedRef?: string): Promise<string[]> {
+  const exclude = excludedRef ? [`--exclude=${excludedRef}`] : [];
+  return [...exclude, '--all', ...(await listStashCommits())];
+}
+
+export type IndexFlag = 'skip-worktree' | 'assume-unchanged';
+
+// Paths marked skip-worktree (also how sparse checkout hides files) or
+// assume-unchanged have a working copy git does not track, and a rewrite would
+// overwrite it without `git status` ever having shown it as modified.
+export async function getIndexFlag(path: string): Promise<IndexFlag | undefined> {
+  const output = await git(['ls-files', '-v', '--', path], { nothrow: true });
+  const tag = output.stdout.charAt(0);
+
+  if (tag === 'S' || tag === 's') {
+    return 'skip-worktree';
+  }
+
+  return tag !== '' && tag === tag.toLowerCase() && tag !== tag.toUpperCase() ? 'assume-unchanged' : undefined;
+}
+
+export async function findCommitsContainingLines(
+  files: string[],
+  contents: string[],
+  tipArgs: readonly string[] = ['--all'],
+): Promise<ContentHit[]> {
   const wanted = Array.from(new Set(contents.filter((content) => content.trim() !== '')));
   const hits: ContentHit[] = [];
 
@@ -242,14 +293,14 @@ export async function findCommitsContainingLines(files: string[], contents: stri
   }
 
   for (const file of Array.from(new Set(files))) {
-    for (const hash of await getCommitsTouchingFileInAllRefs(file)) {
-      const shown = await git(['show', `${hash}:${file}`], { nothrow: true });
+    for (const hash of await getCommitsTouchingFileInRefs(file, tipArgs)) {
+      const shown = await git(['cat-file', 'blob', `${hash}:${file}`], { nothrow: true });
 
       if (shown.exitCode !== 0) {
         continue;
       }
 
-      const fileLines = new Set(shown.stdout.split('\n'));
+      const fileLines = new Set(bytesToByteString(shown.stdoutBytes).split('\n'));
       const found = wanted.filter((content) => fileLines.has(content));
 
       if (found.length > 0) {

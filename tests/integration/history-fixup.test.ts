@@ -1,50 +1,15 @@
 import { afterEach, beforeEach, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, realpathSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import process from 'node:process';
 import { getLineBlameInfo, groupReplacementsByCommit, isGitRepoClean } from '../../src/git-utils.ts';
 import { isHistoryFixupAvailable, performHistoryFixup } from '../../src/history.ts';
 import { performRebase } from '../../src/rebase.ts';
 import { chooseEngine, ENGINE_ENV_VAR } from '../../src/rewrite.ts';
 import type { CommitReplacements } from '../../src/types.ts';
-import { git, initRepo, rejectsWith, writeText } from '../helpers.ts';
+import { commit, git, planFor, rejectsWith, useTempRepo, writeText } from '../helpers.ts';
 
 const historyAvailable = await isHistoryFixupAvailable();
 const skipWithoutHistory = historyAvailable ? false : 'git history fixup is not available (needs Git 2.55+)';
-
-function useTempRepo(objectFormat: 'sha1' | 'sha256' = 'sha1'): void {
-  let originalCwd = '';
-  let tempDir = '';
-
-  beforeEach(async () => {
-    originalCwd = process.cwd();
-    tempDir = realpathSync(mkdtempSync(join(tmpdir(), 'git-private-data-remover-')));
-    process.chdir(tempDir);
-    await initRepo(objectFormat);
-  });
-
-  afterEach(() => {
-    try {
-      process.chdir(originalCwd);
-    } finally {
-      rmSync(tempDir, { recursive: true, force: true });
-    }
-  });
-}
-
-async function commit(file: string, content: string, message: string): Promise<string> {
-  await writeText(file, content);
-  await git('add', '--', file);
-  await git('commit', '-q', '-m', message);
-  return (await git('rev-parse', 'HEAD')).trim();
-}
-
-async function planFor(file: string, line: number, replacement: string): Promise<CommitReplacements[]> {
-  const info = await getLineBlameInfo(file, { start: line, end: line });
-  return groupReplacementsByCommit(info, new Map([[line, replacement]]));
-}
 
 describe('performHistoryFixup', { skip: skipWithoutHistory }, () => {
   useTempRepo();

@@ -1,6 +1,5 @@
-import { writeFile } from 'node:fs/promises';
-import process from 'node:process';
-import { describeError, git, gitText } from './shell.ts';
+import { applyLineEdits, readBlob, stageFileContent } from './blob.ts';
+import { describeError, git } from './shell.ts';
 import type { CommitReplacements } from './types.ts';
 
 // `git history` (Git 2.54+) is experimental; `fixup` arrived in 2.55. Probe the
@@ -28,36 +27,19 @@ export async function performHistoryFixup(commits: CommitReplacements[], headFil
   const newestFirst = [...commits].reverse();
 
   for (const commit of newestFirst) {
-    await stageReplacements(commit, headFile);
+    const content = await readBlob('HEAD', headFile);
+    const edits = commit.lines.map((line) => ({ ...line, lineNumber: line.headLineNumber }));
+    await stageFileContent('HEAD', headFile, applyLineEdits(content, edits, `${headFile} at HEAD`));
 
     try {
       await git(['history', 'fixup', commit.commitHash, '--update-refs=head', '--empty=keep'], {
-        env: { ...process.env, GIT_EDITOR: 'true' },
+        env: { GIT_EDITOR: 'true' },
       });
     } catch (error) {
       await git(['restore', '--staged', '--worktree', '--source=HEAD', '--', headFile], { nothrow: true });
       throw new Error(`git history fixup failed for ${commit.commitHash.slice(0, 8)}: ${describeError(error)}`);
     }
   }
-}
-
-async function stageReplacements(commit: CommitReplacements, headFile: string): Promise<void> {
-  const content = (await gitText(['show', `HEAD:${headFile}`])).split('\n');
-
-  for (const line of commit.lines) {
-    const index = line.headLineNumber - 1;
-
-    if (index < 0 || index >= content.length || content[index] !== line.originalContent) {
-      throw new Error(
-        `Content mismatch at line ${line.headLineNumber} of ${headFile} at HEAD: the line does not match what git blame reported`,
-      );
-    }
-
-    content[index] = line.replacementContent;
-  }
-
-  await writeFile(headFile, content.join('\n'));
-  await git(['add', '--', headFile]);
 }
 
 export function describeHistoryPlan(commits: CommitReplacements[]): string {

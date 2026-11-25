@@ -38,4 +38,6 @@ export interface ContentHit {
   hash: string;
   file: string;
   lines: string[];
+  /** Replaces the default description; must never contain the private data itself. */
+  note?: string;
 }
